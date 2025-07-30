@@ -7,7 +7,43 @@ const PORT = process.env.PORT || 3000;
 // Lag HTTP server først
 const server = http.createServer((req, res) => {
     if (req.url === '/health') {
-        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.writeHead(200, { 'Content-Type': 'application/json' }
+
+// Handle updating winner duration
+function handleUpdateWinnerDuration(clientId, message) {
+    const client = clients.get(clientId);
+    if (!client || !client.roomId) return;
+    
+    const roomId = client.roomId;
+    const room = rooms[roomId];
+    if (!room) return;
+    
+    const { winnerDuration } = message;
+    
+    if (typeof winnerDuration === 'number' && winnerDuration > 0) {
+        // Store duration in room
+        room.winnerDuration = winnerDuration;
+        
+        console.log(`⏱️ Winner duration updated to ${winnerDuration}s in room ${roomId} by ${client.playerName || clientId}`);
+        
+        // Broadcast duration update to all players except sender
+        const durationUpdate = {
+            type: 'winner_duration_update',
+            roomId: roomId,
+            winnerDuration: winnerDuration,
+            updatedBy: client.playerName || clientId
+        };
+        
+        Object.keys(room.players).forEach(playerId => {
+            if (playerId !== clientId) { // Don't send back to sender
+                const playerClient = clients.get(playerId);
+                if (playerClient && playerClient.ws.readyState === WebSocket.OPEN) {
+                    playerClient.ws.send(JSON.stringify(durationUpdate));
+                }
+            }
+        });
+    }
+});
         res.end(JSON.stringify({ 
             status: 'healthy', 
             clients: clients.size,
@@ -93,6 +129,10 @@ wss.on('connection', (ws) => {
                     
                 case 'set_player_order':
                     handleSetPlayerOrder(clientId, message);
+                    break;
+                    
+                case 'update_winner_duration':
+                    handleUpdateWinnerDuration(clientId, message);
                     break;
                     
                 case 'ping':
