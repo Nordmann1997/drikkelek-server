@@ -1,607 +1,890 @@
-const WebSocket = require('ws');
-const http = require('http');
+import SwiftUI
+import Network
+import AVFoundation
 
-// Bruk PORT fra environment (Render.com setter denne) eller 3000 lokalt
-const PORT = process.env.PORT || 3000;
+// MARK: - Models
+struct Player: Codable, Identifiable {
+    let id: String
+    let name: String
+    var isReady: Bool = false
+}
 
-// Lag HTTP server først
-const server = http.createServer((req, res) => {
-    if (req.url === '/health') {
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ 
-            status: 'healthy', 
-            clients: clients.size,
-            rooms: Object.keys(rooms).length,
-            uptime: process.uptime()
-        }));
-    } else {
-        res.writeHead(200, { 'Content-Type': 'text/plain' });
-        res.end('Drikkelek WebSocket Server v2.0 is running!');
+// MARK: - LED Controller
+class LEDController: ObservableObject {
+    static let shared = LEDController()
+    
+    @Published var isFlashlightOn = false
+    @Published var isScreenFlashing = false
+    private var flashTimer: Timer?
+    private var screenFlashTimer: Timer?
+    
+    private init() {}
+    
+    func toggleFlashlight() {
+        isFlashlightOn.toggle()
+        setFlashlight(isFlashlightOn)
     }
-});
-
-// WebSocket server som bruker HTTP serveren
-const wss = new WebSocket.Server({ server });
-
-// Data structures
-const clients = new Map(); // clientId -> client info
-const rooms = {}; // roomId -> room info
-let clientIdCounter = 1;
-
-console.log(`🚀 Drikkelek Server v2.0 startet på port ${PORT}`);
-console.log('📱 Venter på tilkoblinger...\n');
-
-wss.on('connection', (ws) => {
-    // Gi hver klient en unik ID
-    const clientId = `client_${clientIdCounter++}`;
     
-    const clientInfo = {
-        ws: ws,
-        id: clientId,
-        playerName: null,
-        roomId: null,
-        connected: true,
-        joinedAt: new Date()
-    };
-    
-    clients.set(clientId, clientInfo);
-
-    console.log(`✅ Ny klient tilkoblet: ${clientId}`);
-    console.log(`📊 Totalt tilkoblede: ${clients.size}\n`);
-
-    // Send velkommen-melding til ny klient
-    ws.send(JSON.stringify({
-        type: 'connected',
-        clientId: clientId,
-        message: `Du er tilkoblet som ${clientId}`
-    }));
-
-    // Håndter meldinger fra klienter
-    ws.on('message', (data) => {
-        try {
-            const message = JSON.parse(data);
-            console.log(`📨 Melding fra ${clientId}:`, message);
-
-            switch (message.type) {
-                case 'join_room':
-                    handleJoinRoom(clientId, message);
-                    break;
-                    
-                case 'player_info':
-                    handlePlayerInfo(clientId, message);
-                    break;
-                
-                case 'control_led':
-                    handleLedControl(clientId, message);
-                    break;
-                    
-                case 'led_control':
-                    handleLedControl(clientId, message);
-                    break;
-                
-                case 'leave_room':
-                    handleLeaveRoom(clientId, message);
-                    break;
-                    
-                case 'reset_game':
-                    handleResetGame(clientId, message);
-                    break;
-                    
-                case 'start_spinner':
-                    handleStartSpinner(clientId, message);
-                    break;
-                    
-                case 'set_player_order':
-                    handleSetPlayerOrder(clientId, message);
-                    break;
-                    
-                case 'ping':
-                    // Svar på ping for å teste tilkobling
-                    ws.send(JSON.stringify({
-                        type: 'pong',
-                        timestamp: Date.now()
-                    }));
-                    break;
-
-                default:
-                    console.log(`❓ Ukjent meldingstype: ${message.type}`);
+    func setFlashlight(_ isOn: Bool) {
+        guard let device = AVCaptureDevice.default(for: .video),
+              device.hasTorch else {
+            print("Torch not available")
+            return
+        }
+        
+        do {
+            try device.lockForConfiguration()
+            device.torchMode = isOn ? .on : .off
+            device.unlockForConfiguration()
+            
+            DispatchQueue.main.async {
+                self.isFlashlightOn = isOn
             }
-        } catch (error) {
-            console.error(`❌ Feil ved parsing av melding fra ${clientId}:`, error);
-        }
-    });
-
-    // Håndter frakobling
-    ws.on('close', () => {
-        console.log(`❌ Klient frakoblet: ${clientId}`);
-        handleClientDisconnect(clientId);
-    });
-
-    // Håndter feil
-    ws.on('error', (error) => {
-        console.error(`💥 WebSocket feil for ${clientId}:`, error);
-        handleClientDisconnect(clientId);
-    });
-});
-
-// Handle client disconnect and cleanup
-function handleClientDisconnect(clientId) {
-    const client = clients.get(clientId);
-    
-    if (client) {
-        // Remove from room if they were in one
-        if (client.roomId && rooms[client.roomId]) {
-            removePlayerFromRoom(clientId, client.roomId);
-        }
-        
-        // Remove from clients map
-        clients.delete(clientId);
-        
-        console.log(`🧹 Cleaned up client ${clientId}`);
-        console.log(`📊 Totalt tilkoblede: ${clients.size}`);
-        
-        // Log current active clients
-        if (clients.size > 0) {
-            const activeClients = Array.from(clients.values())
-                .filter(c => c.playerName)
-                .map(c => `${c.playerName} (${c.id})`)
-                .join(', ');
-            console.log(`👥 Active players: ${activeClients}`);
+        } catch {
+            print("Torch error: \(error)")
         }
     }
-}
-
-// Handle player joining a room
-function handleJoinRoom(clientId, message) {
-    const { roomId, playerName } = message;
     
-    if (!roomId || !playerName) {
-        console.log(`❌ Missing roomId or playerName from ${clientId}`);
-        return;
-    }
-    
-    const client = clients.get(clientId);
-    if (!client) return;
-    
-    // Update client info
-    client.playerName = playerName;
-    client.roomId = roomId;
-    
-    // Create room if it doesn't exist
-    if (!rooms[roomId]) {
-        rooms[roomId] = {
-            id: roomId,
-            players: {},
-            createdAt: new Date()
-        };
-        console.log(`🏠 Created new room: ${roomId}`);
-    }
-    
-    // Add player to room
-    rooms[roomId].players[clientId] = {
-        id: clientId,
-        name: playerName,
-        joinedAt: new Date()
-    };
-    
-    console.log(`👤 ${playerName} (${clientId}) joined room ${roomId}`);
-    
-    // Send confirmation to player
-    client.ws.send(JSON.stringify({
-        type: 'room_joined',
-        roomId: roomId,
-        playerName: playerName,
-        message: `Du ble med i rom ${roomId} som ${playerName}`
-    }));
-    
-    // Broadcast updated room info to all players in room
-    broadcastRoomUpdate(roomId);
-}
-
-// Handle player info updates
-function handlePlayerInfo(clientId, message) {
-    const { playerName } = message;
-    
-    const client = clients.get(clientId);
-    if (!client) return;
-    
-    client.playerName = playerName;
-    console.log(`📝 Updated player name for ${clientId}: ${playerName}`);
-    
-    // If player is in a room, update room info
-    if (client.roomId && rooms[client.roomId]) {
-        rooms[client.roomId].players[clientId] = {
-            id: clientId,
-            name: playerName,
-            joinedAt: new Date()
-        };
+    func flashPattern(_ pattern: [Double]) {
+        flashTimer?.invalidate()
+        var index = 0
         
-        broadcastRoomUpdate(client.roomId);
-    }
-}
-
-// Handle player leaving room manually
-function handleLeaveRoom(clientId, message) {
-    const client = clients.get(clientId);
-    if (!client || !client.roomId) {
-        console.log(`❌ Client ${clientId} not in any room`);
-        return;
-    }
-    
-    const roomId = client.roomId;
-    removePlayerFromRoom(clientId, roomId);
-    
-    // Clear client room info but keep connection
-    client.roomId = null;
-    
-    // Send confirmation
-    client.ws.send(JSON.stringify({
-        type: 'left_room',
-        roomId: roomId,
-        message: `Du forlot rom ${roomId}`
-    }));
-    
-    console.log(`👋 ${client.playerName || clientId} manually left room ${roomId}`);
-}
-
-// Handle game reset
-function handleResetGame(clientId, message) {
-    const client = clients.get(clientId);
-    if (!client || !client.roomId) return;
-    
-    const roomId = client.roomId;
-    const room = rooms[roomId];
-    if (!room) return;
-    
-    console.log(`🔄 Game reset requested by ${client.playerName || clientId} in room ${roomId}`);
-    
-    // Send reset notification to all players in room
-    const resetMessage = JSON.stringify({
-        type: 'game_reset',
-        roomId: roomId,
-        resetBy: client.playerName || clientId,
-        message: `Spillet ble nullstilt av ${client.playerName || clientId}`
-    });
-    
-    Object.keys(room.players).forEach(playerId => {
-        const playerClient = clients.get(playerId);
-        if (playerClient && playerClient.ws.readyState === WebSocket.OPEN) {
-            playerClient.ws.send(resetMessage);
-        }
-    });
-    
-    console.log(`✅ Game reset notification sent to all players in room ${roomId}`);
-}
-
-// Handle spinner (bottle spin equivalent)
-function handleStartSpinner(clientId, message) {
-    const client = clients.get(clientId);
-    if (!client || !client.roomId) return;
-    
-    const roomId = client.roomId;
-    const room = rooms[roomId];
-    if (!room) return;
-    
-    const playerIds = Object.keys(room.players);
-    if (playerIds.length < 2) {
-        client.ws.send(JSON.stringify({
-            type: 'spinner_error',
-            message: 'Trenger minst 2 spillere for å spinne'
-        }));
-        return;
-    }
-    
-    console.log(`🎰 Spinner started by ${client.playerName || clientId} in room ${roomId}`);
-    
-    // Get player order or use default order
-    const playerOrder = room.playerOrder || playerIds;
-    
-    // Calculate spinner animation
-    const totalSpins = 3 + Math.random() * 2; // 3-5 full rotations
-    const totalSteps = Math.floor(totalSpins * playerOrder.length);
-    const selectedIndex = Math.floor(Math.random() * playerOrder.length);
-    const finalStep = totalSteps + selectedIndex;
-    
-    console.log(`🎯 Spinner will land on ${room.players[playerOrder[selectedIndex]].name} after ${finalStep} steps`);
-    
-    // Send spinner start to all players
-    const spinnerData = {
-        type: 'spinner_start',
-        roomId: roomId,
-        playerOrder: playerOrder,
-        totalSteps: finalStep,
-        startedBy: client.playerName || clientId
-    };
-    
-    Object.keys(room.players).forEach(playerId => {
-        const playerClient = clients.get(playerId);
-        if (playerClient && playerClient.ws.readyState === WebSocket.OPEN) {
-            playerClient.ws.send(JSON.stringify(spinnerData));
-        }
-    });
-    
-    // Start the spinner animation
-    startSpinnerAnimation(roomId, playerOrder, finalStep);
-}
-
-// Handle setting player order for spinner
-function handleSetPlayerOrder(clientId, message) {
-    const client = clients.get(clientId);
-    if (!client || !client.roomId) return;
-    
-    const roomId = client.roomId;
-    const room = rooms[roomId];
-    if (!room) return;
-    
-    const { playerOrder } = message;
-    
-    if (playerOrder && Array.isArray(playerOrder)) {
-        // Validate that all players in order exist in room
-        const validOrder = playerOrder.filter(playerId => room.players[playerId]);
-        
-        if (validOrder.length === Object.keys(room.players).length) {
-            room.playerOrder = validOrder;
-            console.log(`📋 Player order set in room ${roomId}: ${validOrder.map(id => room.players[id].name).join(' → ')}`);
-            
-            // Broadcast new order to all players
-            const orderUpdate = {
-                type: 'player_order_update',
-                roomId: roomId,
-                playerOrder: validOrder,
-                orderNames: validOrder.map(id => room.players[id].name)
-            };
-            
-            Object.keys(room.players).forEach(playerId => {
-                const playerClient = clients.get(playerId);
-                if (playerClient && playerClient.ws.readyState === WebSocket.OPEN) {
-                    playerClient.ws.send(JSON.stringify(orderUpdate));
-                }
-            });
-        }
-    }
-}
-
-// Animate the spinner
-function startSpinnerAnimation(roomId, playerOrder, finalStep) {
-    const room = rooms[roomId];
-    if (!room) return;
-    
-    let currentStep = 0;
-    let currentPlayerIndex = 0;
-    
-    // Start fast, slow down gradually
-    let interval = 100; // Start at 100ms
-    const maxInterval = 800; // End at 800ms
-    
-    function spinStep() {
-        if (currentStep >= finalStep) {
-            // Spinner finished - announce winner
-            const winnerPlayerId = playerOrder[currentPlayerIndex];
-            const winner = room.players[winnerPlayerId];
-            
-            console.log(`🏆 Spinner finished! Winner: ${winner.name} (${winnerPlayerId})`);
-            
-            const winnerData = {
-                type: 'spinner_result',
-                roomId: roomId,
-                winnerId: winnerPlayerId,
-                winnerName: winner.name,
-                message: `🎯 ${winner.name} ble valgt!`
-            };
-            
-            Object.keys(room.players).forEach(playerId => {
-                const playerClient = clients.get(playerId);
-                if (playerClient && playerClient.ws.readyState === WebSocket.OPEN) {
-                    playerClient.ws.send(JSON.stringify(winnerData));
-                }
-            });
-            
-            return;
-        }
-        
-        // Current highlighted player
-        const currentPlayerId = playerOrder[currentPlayerIndex];
-        
-        // Send highlight to all players
-        const highlightData = {
-            type: 'spinner_highlight',
-            roomId: roomId,
-            highlightedPlayerId: currentPlayerId,
-            step: currentStep,
-            totalSteps: finalStep
-        };
-        
-        Object.keys(room.players).forEach(playerId => {
-            const playerClient = clients.get(playerId);
-            if (playerClient && playerClient.ws.readyState === WebSocket.OPEN) {
-                playerClient.ws.send(JSON.stringify(highlightData));
+        flashTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { timer in
+            if index >= pattern.count {
+                timer.invalidate()
+                self.setFlashlight(false)
+                return
             }
-        });
-        
-        // Move to next player
-        currentStep++;
-        currentPlayerIndex = (currentPlayerIndex + 1) % playerOrder.length;
-        
-        // Slow down gradually
-        const progress = currentStep / finalStep;
-        interval = Math.floor(100 + (maxInterval - 100) * Math.pow(progress, 2));
-        
-        // Schedule next step
-        setTimeout(spinStep, interval);
+            
+            let duration = pattern[index]
+            if index % 2 == 0 {
+                self.setFlashlight(true)
+            } else {
+                self.setFlashlight(false)
+            }
+            
+            DispatchQueue.main.asyncAfter(deadline: .now() + duration) {
+                // Timer will handle the next step
+            }
+            
+            index += 1
+        }
     }
     
-    // Start the animation
-    spinStep();
+    func flashScreen(_ pattern: [Double]) {
+        screenFlashTimer?.invalidate()
+        var index = 0
+        
+        screenFlashTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { timer in
+            if index >= pattern.count {
+                timer.invalidate()
+                DispatchQueue.main.async {
+                    self.isScreenFlashing = false
+                }
+                return
+            }
+            
+            let duration = pattern[index]
+            DispatchQueue.main.async {
+                if index % 2 == 0 {
+                    self.isScreenFlashing = true
+                } else {
+                    self.isScreenFlashing = false
+                }
+            }
+            
+            DispatchQueue.main.asyncAfter(deadline: .now() + duration) {
+                // Timer will handle the next step
+            }
+            
+            index += 1
+        }
+    }
+    
+    func flashBoth(_ pattern: [Double]) {
+        flashPattern(pattern)
+        flashScreen(pattern)
+    }
+    
+    func handleLEDCommand(_ action: String) {
+        print("🔥 LEDController handling action: \(action)")
+        
+        switch action {
+        case "on":
+            print("💡 Setting flashlight ON")
+            setFlashlight(true)
+        case "off":
+            print("💡 Setting flashlight OFF")
+            setFlashlight(false)
+        case "flash":
+            print("⚡ Flashing LED pattern")
+            flashPattern([0.2, 0.2, 0.2, 0.2])
+        case "screen_flash":
+            print("📱 Flashing screen pattern")
+            flashScreen([0.2, 0.2, 0.2, 0.2])
+        case "both_flash":
+            print("🔥 Flashing both LED and screen")
+            flashBoth([0.2, 0.2, 0.2, 0.2])
+        case "spinner_highlight":
+            print("🎯 Spinner highlight - strong flash")
+            flashBoth([0.15, 0.05, 0.15, 0.05])
+        case "spinner_tick":
+            print("🎰 Spinner tick - subtle screen flash")
+            flashScreen([0.1, 0.05])
+        default:
+            print("❓ Unknown LED action: \(action)")
+        }
+    }
 }
 
-// Handle LED control
-function handleLedControl(clientId, message) {
-    const { targetClientId, targetId, action } = message;
-    const target = targetClientId || targetId;
+// MARK: - WebSocket Manager
+class WebSocketManager: ObservableObject {
+    @Published var isConnected = false
+    @Published var players: [Player] = []
+    @Published var gameMessage: String = ""
+    @Published var currentPlayerId: String = ""
+    @Published var currentRoomId: String = ""
+    @Published var isSpinnerActive = false
+    @Published var highlightedPlayerId: String = ""
+    @Published var playerOrder: [String] = []
     
-    console.log(`💡 LED kontroll: ${clientId} vil ${action} LED på ${target}`);
+    private var webSocketTask: URLSessionWebSocketTask?
+    private let serverURL = URL(string: "wss://drikkelek-server.onrender.com")!
+    private let urlSession = URLSession(configuration: .default)
     
-    const senderClient = clients.get(clientId);
-    if (!senderClient) return;
+    func connect() {
+        webSocketTask = urlSession.webSocketTask(with: serverURL)
+        webSocketTask?.resume()
+        
+        receiveMessage()
+        
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+            self.isConnected = true
+            print("✅ Connection status set to connected")
+        }
+    }
     
-    if (target === 'all') {
-        // Send to all players in the same room
-        if (senderClient.roomId && rooms[senderClient.roomId]) {
-            const room = rooms[senderClient.roomId];
-            
-            Object.keys(room.players).forEach(playerId => {
-                if (playerId !== clientId) {
-                    const targetClient = clients.get(playerId);
-                    if (targetClient && targetClient.ws.readyState === WebSocket.OPEN) {
-                        targetClient.ws.send(JSON.stringify({
-                            type: 'led_command',
-                            action: action,
-                            from: clientId,
-                            fromName: senderClient.playerName || clientId,
-                            timestamp: Date.now()
-                        }));
+    func disconnect() {
+        webSocketTask?.cancel(with: .goingAway, reason: nil)
+        isConnected = false
+    }
+    
+    private func receiveMessage() {
+        webSocketTask?.receive { [weak self] result in
+            switch result {
+            case .success(let message):
+                switch message {
+                case .string(let text):
+                    self?.handleMessage(text)
+                case .data(let data):
+                    if let text = String(data: data, encoding: .utf8) {
+                        self?.handleMessage(text)
+                    }
+                @unknown default:
+                    break
+                }
+                self?.receiveMessage()
+                
+            case .failure(let error):
+                print("WebSocket error: \(error)")
+                DispatchQueue.main.async {
+                    self?.isConnected = false
+                }
+            }
+        }
+    }
+    
+    private func handleMessage(_ text: String) {
+        print("📨 Received message: \(text)")
+        
+        guard let data = text.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let messageType = json["type"] as? String else {
+            print("❌ Failed to parse JSON")
+            return
+        }
+        
+        DispatchQueue.main.async {
+            switch messageType {
+            case "connected":
+                print("✅ Connected to server")
+                if let clientId = json["clientId"] as? String {
+                    self.currentPlayerId = clientId
+                    print("📱 Our client ID: \(clientId)")
+                }
+                
+            case "room_joined":
+                print("🏠 Successfully joined room")
+                if let roomId = json["roomId"] as? String {
+                    self.currentRoomId = roomId
+                    print("🏠 Joined room: \(roomId)")
+                }
+                
+            case "room_update":
+                print("🔄 Room update received - processing players")
+                self.handleRoomUpdate(json)
+                
+            case "led_command":
+                print("💡 LED Command received")
+                self.handleLEDCommand(json)
+                
+            case "led_control_sent":
+                print("✅ LED control confirmation")
+                if let message = json["message"] as? String {
+                    self.gameMessage = message
+                }
+                
+            case "error":
+                print("❌ Server error")
+                if let message = json["message"] as? String {
+                    self.gameMessage = "Feil: \(message)"
+                }
+                
+            case "left_room":
+                print("👋 Left room confirmation")
+                self.currentRoomId = ""
+                self.players = []
+                if let message = json["message"] as? String {
+                    self.gameMessage = message
+                }
+                
+            case "game_reset":
+                print("🔄 Game reset notification")
+                if let resetBy = json["resetBy"] as? String,
+                   let message = json["message"] as? String {
+                    self.gameMessage = "🔄 \(message)"
+                    print("Game reset by: \(resetBy)")
+                }
+                
+            case "spinner_start":
+                print("🎰 Spinner started")
+                self.isSpinnerActive = true
+                if let playerOrder = json["playerOrder"] as? [String] {
+                    self.playerOrder = playerOrder
+                }
+                
+            case "spinner_highlight":
+                print("🎯 Spinner highlight")
+                if let playerId = json["highlightedPlayerId"] as? String {
+                    self.highlightedPlayerId = playerId
+                    
+                    // Execute LED command if provided
+                    if let ledAction = json["ledAction"] as? String {
+                        print("💡 Executing LED action from spinner: \(ledAction)")
+                        LEDController.shared.handleLEDCommand(ledAction)
                     }
                 }
-            });
+                
+            case "spinner_result":
+                print("🏆 Spinner result")
+                self.isSpinnerActive = false
+                self.highlightedPlayerId = ""
+                if let winnerName = json["winnerName"] as? String,
+                   let message = json["message"] as? String {
+                    self.gameMessage = message
+                }
+                
+            case "player_order_update":
+                print("📋 Player order updated")
+                if let playerOrder = json["playerOrder"] as? [String] {
+                    self.playerOrder = playerOrder
+                }
+                
+            case "spinner_error":
+                print("❌ Spinner error")
+                if let message = json["message"] as? String {
+                    self.gameMessage = message
+                }
+                
+            case "pong":
+                print("🏓 Pong received")
+                
+            default:
+                print("❓ Unknown message type: \(messageType)")
+            }
+        }
+    }
+    
+    private func handleRoomUpdate(_ json: [String: Any]) {
+        print("🔄 Processing room update...")
+        
+        guard let playersArray = json["players"] as? [[String: Any]] else {
+            print("❌ No players array in room update")
+            return
+        }
+        
+        print("👥 Found \(playersArray.count) players in room update")
+        
+        var newPlayers: [Player] = []
+        for playerData in playersArray {
+            if let id = playerData["id"] as? String,
+               let name = playerData["name"] as? String {
+                let player = Player(id: id, name: name, isReady: true)
+                newPlayers.append(player)
+                print("✅ Added player: \(name) (\(id))")
+            }
+        }
+        
+        self.players = newPlayers
+        print("🎯 Final players list: \(newPlayers.map { $0.name })")
+    }
+    
+    private func handleLEDCommand(_ json: [String: Any]) {
+        print("💡 Processing LED command: \(json)")
+        
+        guard let action = json["action"] as? String else {
+            print("❌ No action in LED command")
+            return
+        }
+        
+        let from = json["fromName"] as? String ?? json["from"] as? String ?? "unknown"
+        print("💡 LED command '\(action)' from \(from)")
+        
+        // Execute LED command immediately
+        LEDController.shared.handleLEDCommand(action)
+        print("✅ LED command executed: \(action)")
+    }
+    
+    func joinRoom(_ roomId: String, playerName: String) {
+        currentRoomId = roomId
+        
+        let message = [
+            "type": "join_room",
+            "roomId": roomId,
+            "playerName": playerName
+        ] as [String : Any]
+        
+        sendRawMessage(message)
+        print("🔗 Joining room \(roomId) as \(playerName)")
+    }
+    
+    func sendLEDCommand(to targetClientId: String, action: String) {
+        let message = [
+            "type": "control_led",
+            "targetClientId": targetClientId,
+            "action": action
+        ] as [String : Any]
+        
+        sendRawMessage(message)
+        print("💡 Sending LED command: \(action) to \(targetClientId)")
+    }
+    
+    func sendLEDCommandToAll(action: String) {
+        let message = [
+            "type": "control_led",
+            "targetClientId": "all",
+            "action": action
+        ] as [String : Any]
+        
+        sendRawMessage(message)
+        print("💡 Sending LED command: \(action) to all players")
+    }
+    
+    func leaveRoom() {
+        if !currentRoomId.isEmpty {
+            let message = [
+                "type": "leave_room",
+                "roomId": currentRoomId
+            ] as [String : Any]
             
-            console.log(`✅ LED kommando '${action}' sendt til alle i rom ${senderClient.roomId}`);
+            sendRawMessage(message)
+            print("👋 Leaving room \(currentRoomId)")
+            
+            currentRoomId = ""
+            players = []
         }
-    } else {
-        // Send to specific target
-        const targetClient = clients.get(target);
+    }
+    
+    func resetGame() {
+        if !currentRoomId.isEmpty {
+            let message = [
+                "type": "reset_game",
+                "roomId": currentRoomId
+            ] as [String : Any]
+            
+            sendRawMessage(message)
+            print("🔄 Requesting game reset")
+        }
+    }
+    
+    func startSpinner() {
+        if !currentRoomId.isEmpty {
+            let message = [
+                "type": "start_spinner",
+                "roomId": currentRoomId
+            ] as [String : Any]
+            
+            sendRawMessage(message)
+            print("🎰 Starting spinner")
+        }
+    }
+    
+    func setPlayerOrder(_ order: [String]) {
+        if !currentRoomId.isEmpty {
+            let message = [
+                "type": "set_player_order",
+                "roomId": currentRoomId,
+                "playerOrder": order
+            ] as [String : Any]
+            
+            sendRawMessage(message)
+            print("📋 Setting player order: \(order)")
+        }
+    }
+    
+    private func sendRawMessage(_ messageDict: [String: Any]) {
+        guard let jsonData = try? JSONSerialization.data(withJSONObject: messageDict),
+              let jsonString = String(data: jsonData, encoding: .utf8) else {
+            print("❌ Failed to create JSON")
+            return
+        }
         
-        if (!targetClient) {
-            senderClient.ws.send(JSON.stringify({
-                type: 'error',
-                message: `Klient ${target} ikke funnet`
-            }));
-            return;
+        print("📤 Sending: \(jsonString)")
+        webSocketTask?.send(.string(jsonString)) { error in
+            if let error = error {
+                print("❌ Send error: \(error)")
+            } else {
+                print("✅ Message sent successfully")
+            }
         }
-
-        // Send LED command to target
-        targetClient.ws.send(JSON.stringify({
-            type: 'led_command',
-            action: action,
-            from: clientId,
-            fromName: senderClient.playerName || clientId,
-            timestamp: Date.now()
-        }));
-
-        // Confirm to sender
-        senderClient.ws.send(JSON.stringify({
-            type: 'led_control_sent',
-            targetClientId: target,
-            action: action,
-            message: `LED ${action} kommando sendt til ${targetClient.playerName || target}`
-        }));
-
-        console.log(`✅ LED kommando '${action}' sendt fra ${senderClient.playerName || clientId} til ${targetClient.playerName || target}`);
     }
 }
 
-// Broadcast room update to all players in room
-function broadcastRoomUpdate(roomId) {
-    const room = rooms[roomId];
-    if (!room) return;
+// MARK: - Main Views
+struct ContentView: View {
+    @StateObject private var webSocketManager = WebSocketManager()
+    @StateObject private var ledController = LEDController.shared
     
-    const playersList = Object.values(room.players).map(player => ({
-        id: player.id,
-        name: player.name,
-        joinedAt: player.joinedAt
-    }));
+    @State private var playerName = ""
+    @State private var showingGame = false
     
-    const updateMessage = JSON.stringify({
-        type: 'room_update',
-        roomId: roomId,
-        players: playersList,
-        playerCount: playersList.length
-    });
-    
-    // Send to all players in room
-    Object.keys(room.players).forEach(playerId => {
-        const client = clients.get(playerId);
-        if (client && client.ws.readyState === WebSocket.OPEN) {
-            client.ws.send(updateMessage);
+    var body: some View {
+        NavigationView {
+            VStack(spacing: 30) {
+                VStack {
+                    Text("🍻 Drikkelek")
+                        .font(.largeTitle)
+                        .fontWeight(.bold)
+                    
+                    Text("LED Party Game")
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+                }
+                
+                HStack {
+                    Circle()
+                        .fill(webSocketManager.isConnected ? Color.green : Color.red)
+                        .frame(width: 12, height: 12)
+                    
+                    Text(webSocketManager.isConnected ? "Tilkoblet server" : "Ikke tilkoblet")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                
+                VStack(spacing: 20) {
+                    TextField("Ditt navn", text: $playerName)
+                        .textFieldStyle(RoundedBorderTextFieldStyle())
+                        .font(.title3)
+                    
+                    Text("Alle spillere går automatisk inn i samme rom")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                
+                VStack(spacing: 15) {
+                    Button(action: {
+                        if !webSocketManager.isConnected {
+                            webSocketManager.connect()
+                        } else {
+                            webSocketManager.joinRoom("MAIN", playerName: playerName)
+                            showingGame = true
+                        }
+                    }) {
+                        Text(webSocketManager.isConnected ? "Bli med i spill" : "Koble til server")
+                            .foregroundColor(.white)
+                            .padding()
+                            .frame(maxWidth: .infinity)
+                            .background(Color.blue)
+                            .cornerRadius(10)
+                    }
+                    .disabled(playerName.isEmpty)
+                    
+                    Button(action: {
+                        ledController.toggleFlashlight()
+                    }) {
+                        HStack {
+                            Image(systemName: ledController.isFlashlightOn ? "flashlight.on.fill" : "flashlight.off.fill")
+                            Text(ledController.isFlashlightOn ? "Slå av LED" : "Test LED")
+                        }
+                        .foregroundColor(.white)
+                        .padding()
+                        .frame(maxWidth: .infinity)
+                        .background(ledController.isFlashlightOn ? Color.orange : Color.gray)
+                        .cornerRadius(10)
+                    }
+                }
+                
+                Spacer()
+                
+                if !webSocketManager.gameMessage.isEmpty {
+                    Text(webSocketManager.gameMessage)
+                        .padding()
+                        .background(Color.blue.opacity(0.1))
+                        .cornerRadius(10)
+                }
+            }
+            .padding()
+            .navigationTitle("Drikkelek")
         }
-    });
-    
-    console.log(`🔄 Room update sent to ${playersList.length} players in room ${roomId}`);
+        .sheet(isPresented: $showingGame) {
+            GameView(webSocketManager: webSocketManager)
+        }
+        .onAppear {
+            webSocketManager.connect()
+        }
+    }
 }
 
-// Remove player from room
-function removePlayerFromRoom(clientId, roomId) {
-    if (!rooms[roomId]) return;
+struct GameView: View {
+    @ObservedObject var webSocketManager: WebSocketManager
+    @StateObject private var ledController = LEDController.shared
+    @State private var showingPlayerOrder = false
     
-    const room = rooms[roomId];
-    const player = room.players[clientId];
+    @Environment(\.presentationMode) var presentationMode
     
-    if (player) {
-        delete room.players[clientId];
-        console.log(`👋 ${player.name} (${clientId}) left room ${roomId}`);
-        
-        // If room is empty, delete it
-        if (Object.keys(room.players).length === 0) {
-            delete rooms[roomId];
-            console.log(`🗑️ Deleted empty room ${roomId}`);
+    var body: some View {
+        NavigationView {
+            ZStack {
+                Color.black.ignoresSafeArea()
+                
+                if ledController.isScreenFlashing {
+                    Color.white
+                        .ignoresSafeArea()
+                        .animation(.easeInOut(duration: 0.1), value: ledController.isScreenFlashing)
+                }
+                
+                ScrollView {
+                    VStack(spacing: 20) {
+                        VStack {
+                            Text("🎮 Spill i gang!")
+                                .font(.title2)
+                                .fontWeight(.bold)
+                                .foregroundColor(ledController.isScreenFlashing ? .black : .white)
+                            
+                            if !webSocketManager.currentRoomId.isEmpty {
+                                Text("Rom: \(webSocketManager.currentRoomId)")
+                                    .font(.caption)
+                                    .foregroundColor(ledController.isScreenFlashing ? .black : .secondary)
+                            }
+                        }
+                        
+                        // Spinner Section
+                        VStack(spacing: 15) {
+                            Text("🎯 Tilfeldig velger")
+                                .font(.headline)
+                                .foregroundColor(ledController.isScreenFlashing ? .black : .white)
+                            
+                            if webSocketManager.isSpinnerActive {
+                                VStack {
+                                    Text("🎰 Spinner kjører...")
+                                        .font(.subheadline)
+                                        .foregroundColor(.orange)
+                                    
+                                    ProgressView()
+                                        .progressViewStyle(CircularProgressViewStyle(tint: .orange))
+                                }
+                            } else {
+                                HStack(spacing: 10) {
+                                    Button("🎰 Spin!") {
+                                        webSocketManager.startSpinner()
+                                    }
+                                    .buttonStyle(SpinnerButtonStyle(color: .purple))
+                                    .disabled(webSocketManager.players.count < 2)
+                                    
+                                    Button("📋") {
+                                        showingPlayerOrder = true
+                                    }
+                                    .buttonStyle(SpinnerButtonStyle(color: .gray))
+                                }
+                                
+                                if webSocketManager.players.count < 2 {
+                                    Text("Trenger minst 2 spillere")
+                                        .font(.caption)
+                                        .foregroundColor(.orange)
+                                }
+                            }
+                        }
+                        
+                        Divider().background(ledController.isScreenFlashing ? Color.black : Color.white)
+                        
+                        // LED Controls
+                        VStack(spacing: 15) {
+                            Text("Kontroller alle:")
+                                .font(.headline)
+                                .foregroundColor(ledController.isScreenFlashing ? .black : .white)
+                            
+                            HStack(spacing: 10) {
+                                Button("💡 På") {
+                                    webSocketManager.sendLEDCommandToAll(action: "on")
+                                    ledController.setFlashlight(true)
+                                }
+                                .buttonStyle(SpinnerButtonStyle(color: .green))
+                                
+                                Button("💡 Av") {
+                                    webSocketManager.sendLEDCommandToAll(action: "off")
+                                    ledController.setFlashlight(false)
+                                }
+                                .buttonStyle(SpinnerButtonStyle(color: .red))
+                            }
+                            
+                            HStack(spacing: 10) {
+                                Button("⚡ LED") {
+                                    webSocketManager.sendLEDCommandToAll(action: "flash")
+                                    ledController.flashPattern([0.2, 0.2, 0.2, 0.2])
+                                }
+                                .buttonStyle(SpinnerButtonStyle(color: .orange))
+                                
+                                Button("📱 Skjerm") {
+                                    webSocketManager.sendLEDCommandToAll(action: "screen_flash")
+                                    ledController.flashScreen([0.2, 0.2, 0.2, 0.2])
+                                }
+                                .buttonStyle(SpinnerButtonStyle(color: .blue))
+                            }
+                            
+                            Button("🔥 Alt!") {
+                                webSocketManager.sendLEDCommandToAll(action: "both_flash")
+                                ledController.flashBoth([0.2, 0.2, 0.2, 0.2])
+                            }
+                            .buttonStyle(SpinnerButtonStyle(color: .purple))
+                            
+                            // Test button for spinner effects
+                            Button("🧪 Test Spinner") {
+                                print("🧪 Testing spinner LED effects locally")
+                                ledController.handleLEDCommand("spinner_highlight")
+                                
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                                    ledController.handleLEDCommand("spinner_tick")
+                                }
+                            }
+                            .buttonStyle(SpinnerButtonStyle(color: .pink))
+                        }
+                        
+                        Divider().background(ledController.isScreenFlashing ? Color.black : Color.white)
+                        
+                        // Players List
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text("Spillere (\(webSocketManager.players.count)):")
+                                .font(.headline)
+                                .foregroundColor(ledController.isScreenFlashing ? .black : .white)
+                            
+                            if webSocketManager.players.isEmpty {
+                                Text("Kun du er i rommet...")
+                                    .font(.caption)
+                                    .foregroundColor(ledController.isScreenFlashing ? .black : .secondary)
+                                    .padding()
+                            } else {
+                                ForEach(webSocketManager.players) { player in
+                                    VStack(spacing: 8) {
+                                        HStack {
+                                            Circle()
+                                                .fill(getPlayerColor(for: player))
+                                                .frame(width: 12, height: 12)
+                                            
+                                            VStack(alignment: .leading, spacing: 2) {
+                                                Text(player.name)
+                                                    .font(.body)
+                                                    .fontWeight(player.id == webSocketManager.currentPlayerId ? .bold : .regular)
+                                                    .foregroundColor(ledController.isScreenFlashing ? .black : .white)
+                                                
+                                                Text(player.id == webSocketManager.currentPlayerId ? "Dette er deg" : "Kan kontrollere")
+                                                    .font(.caption)
+                                                    .foregroundColor(ledController.isScreenFlashing ? .black : .secondary)
+                                            }
+                                            
+                                            Spacer()
+                                        }
+                                        
+                                        if player.id != webSocketManager.currentPlayerId {
+                                            HStack(spacing: 8) {
+                                                Button("💡") {
+                                                    webSocketManager.sendLEDCommand(to: player.id, action: "on")
+                                                }
+                                                .buttonStyle(SmallButtonStyle(color: .green))
+                                                
+                                                Button("❌") {
+                                                    webSocketManager.sendLEDCommand(to: player.id, action: "off")
+                                                }
+                                                .buttonStyle(SmallButtonStyle(color: .red))
+                                                
+                                                Button("⚡") {
+                                                    webSocketManager.sendLEDCommand(to: player.id, action: "flash")
+                                                }
+                                                .buttonStyle(SmallButtonStyle(color: .orange))
+                                                
+                                                Button("📱") {
+                                                    webSocketManager.sendLEDCommand(to: player.id, action: "screen_flash")
+                                                }
+                                                .buttonStyle(SmallButtonStyle(color: .blue))
+                                            }
+                                        }
+                                    }
+                                    .padding(.horizontal, 12)
+                                    .padding(.vertical, 10)
+                                    .background(getPlayerBackground(for: player))
+                                    .cornerRadius(8)
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 8)
+                                            .stroke(
+                                                webSocketManager.highlightedPlayerId == player.id ? Color.yellow : Color.clear,
+                                                lineWidth: 3
+                                            )
+                                            .animation(.easeInOut(duration: 0.2), value: webSocketManager.highlightedPlayerId)
+                                    )
+                                }
+                            }
+                        }
+                        
+                        Spacer(minLength: 50)
+                    }
+                    .padding()
+                }
+            }
+            .navigationTitle("Drikkelek")
+            .navigationBarItems(
+                leading: Button("🔄") {
+                    webSocketManager.resetGame()
+                },
+                trailing: Button("Lukk") {
+                    webSocketManager.leaveRoom()
+                    presentationMode.wrappedValue.dismiss()
+                }
+            )
+        }
+        .sheet(isPresented: $showingPlayerOrder) {
+            PlayerOrderView(webSocketManager: webSocketManager)
+        }
+    }
+    
+    private func getPlayerColor(for player: Player) -> Color {
+        if webSocketManager.highlightedPlayerId == player.id {
+            return .yellow
+        } else if player.id == webSocketManager.currentPlayerId {
+            return .blue
         } else {
-            // Broadcast update to remaining players
-            broadcastRoomUpdate(roomId);
+            return .green
+        }
+    }
+    
+    private func getPlayerBackground(for player: Player) -> Color {
+        if webSocketManager.highlightedPlayerId == player.id {
+            return Color.yellow.opacity(0.3)
+        } else if player.id == webSocketManager.currentPlayerId {
+            return Color.blue.opacity(0.1)
+        } else {
+            return Color.gray.opacity(0.1)
         }
     }
 }
 
-// Start HTTP server (som også håndterer WebSocket)
-server.listen(PORT, () => {
-    console.log(`🌐 HTTP server tilgjengelig på port ${PORT}`);
-    console.log(`🔌 WebSocket server tilgjengelig på ws://localhost:${PORT}`);
-    console.log(`📍 Health check: http://localhost:${PORT}/health\n`);
-});
-
-// Graceful shutdown
-process.on('SIGINT', () => {
-    console.log('\n🛑 Server stenges ned...');
+struct PlayerOrderView: View {
+    @ObservedObject var webSocketManager: WebSocketManager
+    @Environment(\.presentationMode) var presentationMode
     
-    // Lukk alle WebSocket-tilkoblinger
-    clients.forEach((client) => {
-        client.ws.close();
-    });
+    @State private var orderedPlayers: [Player] = []
     
-    // Lukk serverne
-    wss.close();
-    server.close(() => {
-        console.log('✅ Server stengt');
-        process.exit(0);
-    });
-});
-
-// Status logging every 30 seconds
-setInterval(() => {
-    const activeClients = Array.from(clients.values()).filter(c => c.ws.readyState === WebSocket.OPEN);
-    const activeRooms = Object.keys(rooms).length;
-    
-    console.log(`\n📊 Status: ${activeClients.length} aktive klienter, ${activeRooms} aktive rom`);
-    
-    if (activeRooms > 0) {
-        Object.entries(rooms).forEach(([roomId, room]) => {
-            const playerNames = Object.values(room.players).map(p => p.name).join(', ');
-            console.log(`  🏠 Rom ${roomId}: ${playerNames} (${Object.keys(room.players).length} spillere)`);
-        });
-    } else {
-        console.log(`  📭 Ingen aktive rom`);
-    }
-    
-    // Clean up any stale connections
-    let cleanedUp = 0;
-    clients.forEach((client, clientId) => {
-        if (client.ws.readyState !== WebSocket.OPEN) {
-            handleClientDisconnect(clientId);
-            cleanedUp++;
+    var body: some View {
+        NavigationView {
+            VStack(spacing: 20) {
+                Text("🎯 Spinner rekkefølge")
+                    .font(.title2)
+                    .fontWeight(.bold)
+                
+                Text("Dra spillerne for å endre rekkefølgen")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                
+                List {
+                    ForEach(orderedPlayers.indices, id: \.self) { index in
+                        HStack {
+                            Text("\(index + 1).")
+                                .font(.headline)
+                                .foregroundColor(.secondary)
+                            
+                            Circle()
+                                .fill(orderedPlayers[index].id == webSocketManager.currentPlayerId ? Color.blue : Color.green)
+                                .frame(width: 12, height: 12)
+                            
+                            Text(orderedPlayers[index].name)
+                                .font(.body)
+                            
+                            Spacer()
+                        }
+                    }
+                    .onMove(perform: movePlayer)
+                }
+                
+                VStack(spacing: 15) {
+                    Button("💾 Lagre rekkefølge") {
+                        let playerOrder = orderedPlayers.map { $0.id }
+                        webSocketManager.setPlayerOrder(playerOrder)
+                        presentationMode.wrappedValue.dismiss()
+                    }
+                    .buttonStyle(SpinnerButtonStyle(color: .blue))
+                    
+                    Button("🔀 Tilfeldig") {
+                        orderedPlayers.shuffle()
+                    }
+                    .buttonStyle(SpinnerButtonStyle(color: .orange))
+                }
+            }
+            .padding()
+            .navigationTitle("Rekkefølge")
+            .navigationBarItems(trailing: Button("Lukk") {
+                presentationMode.wrappedValue.dismiss()
+            })
         }
-    });
-    
-    if (cleanedUp > 0) {
-        console.log(`🧹 Cleaned up ${cleanedUp} stale connections`);
+        .onAppear {
+            orderedPlayers = webSocketManager.players
+        }
     }
-}, 30000);
+    
+    private func movePlayer(from source: IndexSet, to destination: Int) {
+        orderedPlayers.move(fromOffsets: source, toOffset: destination)
+    }
+}
 
-console.log('🔗 Server v2.0 klar for tilkoblinger!');
+// MARK: - Button Styles
+struct SpinnerButtonStyle: ButtonStyle {
+    let color: Color
+    
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .foregroundColor(.white)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(color)
+            .cornerRadius(8)
+            .scaleEffect(configuration.isPressed ? 0.95 : 1.0)
+    }
+}
+
+struct SmallButtonStyle: ButtonStyle {
+    let color: Color
+    
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.caption)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 4)
+            .background(color.opacity(0.2))
+            .cornerRadius(4)
+            .scaleEffect(configuration.isPressed ? 0.95 : 1.0)
+    }
+}
+
+// MARK: - Preview
+struct ContentView_Previews: PreviewProvider {
+    static var previews: some View {
+        ContentView()
+    }
+}
