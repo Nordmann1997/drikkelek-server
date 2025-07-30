@@ -149,7 +149,7 @@ function handleClientDisconnect(clientId) {
             console.log(`👥 Active players: ${activeClients}`);
         }
     }
-});
+}
 
 // Handle player joining a room
 function handleJoinRoom(clientId, message) {
@@ -433,6 +433,9 @@ function startSpinnerAnimation(roomId, playerOrder, finalStep) {
     // Start the animation
     spinStep();
 }
+
+// Handle LED control
+function handleLedControl(clientId, message) {
     const { targetClientId, targetId, action } = message;
     const target = targetClientId || targetId;
     
@@ -496,8 +499,8 @@ function startSpinnerAnimation(roomId, playerOrder, finalStep) {
     }
 }
 
-// Remove player from room
-function removePlayerFromRoom(clientId, roomId) {
+// Broadcast room update to all players in room
+function broadcastRoomUpdate(roomId) {
     const room = rooms[roomId];
     if (!room) return;
     
@@ -525,8 +528,8 @@ function removePlayerFromRoom(clientId, roomId) {
     console.log(`🔄 Room update sent to ${playersList.length} players in room ${roomId}`);
 }
 
-// Handle LED control
-function handleLedControl(clientId, message) {
+// Remove player from room
+function removePlayerFromRoom(clientId, roomId) {
     if (!rooms[roomId]) return;
     
     const room = rooms[roomId];
@@ -534,7 +537,7 @@ function handleLedControl(clientId, message) {
     
     if (player) {
         delete room.players[clientId];
-        console.log(`👋 ${player.name} left room ${roomId}`);
+        console.log(`👋 ${player.name} (${clientId}) left room ${roomId}`);
         
         // If room is empty, delete it
         if (Object.keys(room.players).length === 0) {
