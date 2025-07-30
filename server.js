@@ -79,6 +79,22 @@ wss.on('connection', (ws) => {
                     handleLedControl(clientId, message);
                     break;
                 
+                case 'leave_room':
+                    handleLeaveRoom(clientId, message);
+                    break;
+                    
+                case 'reset_game':
+                    handleResetGame(clientId, message);
+                    break;
+                    
+                case 'start_spinner':
+                    handleStartSpinner(clientId, message);
+                    break;
+                    
+                case 'set_player_order':
+                    handleSetPlayerOrder(clientId, message);
+                    break;
+                    
                 case 'ping':
                     // Svar på ping for å teste tilkobling
                     ws.send(JSON.stringify({
@@ -98,27 +114,41 @@ wss.on('connection', (ws) => {
     // Håndter frakobling
     ws.on('close', () => {
         console.log(`❌ Klient frakoblet: ${clientId}`);
-        
-        const client = clients.get(clientId);
-        if (client && client.roomId) {
-            removePlayerFromRoom(clientId, client.roomId);
-        }
-        
-        clients.delete(clientId);
-        console.log(`📊 Totalt tilkoblede: ${clients.size}\n`);
+        handleClientDisconnect(clientId);
     });
 
     // Håndter feil
     ws.on('error', (error) => {
         console.error(`💥 WebSocket feil for ${clientId}:`, error);
-        
-        const client = clients.get(clientId);
-        if (client && client.roomId) {
+        handleClientDisconnect(clientId);
+    });
+});
+
+// Handle client disconnect and cleanup
+function handleClientDisconnect(clientId) {
+    const client = clients.get(clientId);
+    
+    if (client) {
+        // Remove from room if they were in one
+        if (client.roomId && rooms[client.roomId]) {
             removePlayerFromRoom(clientId, client.roomId);
         }
         
+        // Remove from clients map
         clients.delete(clientId);
-    });
+        
+        console.log(`🧹 Cleaned up client ${clientId}`);
+        console.log(`📊 Totalt tilkoblede: ${clients.size}`);
+        
+        // Log current active clients
+        if (clients.size > 0) {
+            const activeClients = Array.from(clients.values())
+                .filter(c => c.playerName)
+                .map(c => `${c.playerName} (${c.id})`)
+                .join(', ');
+            console.log(`👥 Active players: ${activeClients}`);
+        }
+    }
 });
 
 // Handle player joining a room
@@ -190,8 +220,219 @@ function handlePlayerInfo(clientId, message) {
     }
 }
 
-// Handle LED control
-function handleLedControl(clientId, message) {
+// Handle player leaving room manually
+function handleLeaveRoom(clientId, message) {
+    const client = clients.get(clientId);
+    if (!client || !client.roomId) {
+        console.log(`❌ Client ${clientId} not in any room`);
+        return;
+    }
+    
+    const roomId = client.roomId;
+    removePlayerFromRoom(clientId, roomId);
+    
+    // Clear client room info but keep connection
+    client.roomId = null;
+    
+    // Send confirmation
+    client.ws.send(JSON.stringify({
+        type: 'left_room',
+        roomId: roomId,
+        message: `Du forlot rom ${roomId}`
+    }));
+    
+    console.log(`👋 ${client.playerName || clientId} manually left room ${roomId}`);
+}
+
+// Handle game reset
+function handleResetGame(clientId, message) {
+    const client = clients.get(clientId);
+    if (!client || !client.roomId) return;
+    
+    const roomId = client.roomId;
+    const room = rooms[roomId];
+    if (!room) return;
+    
+    console.log(`🔄 Game reset requested by ${client.playerName || clientId} in room ${roomId}`);
+    
+    // Send reset notification to all players in room
+    const resetMessage = JSON.stringify({
+        type: 'game_reset',
+        roomId: roomId,
+        resetBy: client.playerName || clientId,
+        message: `Spillet ble nullstilt av ${client.playerName || clientId}`
+    });
+    
+    Object.keys(room.players).forEach(playerId => {
+        const playerClient = clients.get(playerId);
+        if (playerClient && playerClient.ws.readyState === WebSocket.OPEN) {
+            playerClient.ws.send(resetMessage);
+        }
+    });
+    
+    console.log(`✅ Game reset notification sent to all players in room ${roomId}`);
+}
+
+// Handle spinner (bottle spin equivalent)
+function handleStartSpinner(clientId, message) {
+    const client = clients.get(clientId);
+    if (!client || !client.roomId) return;
+    
+    const roomId = client.roomId;
+    const room = rooms[roomId];
+    if (!room) return;
+    
+    const playerIds = Object.keys(room.players);
+    if (playerIds.length < 2) {
+        client.ws.send(JSON.stringify({
+            type: 'spinner_error',
+            message: 'Trenger minst 2 spillere for å spinne'
+        }));
+        return;
+    }
+    
+    console.log(`🎰 Spinner started by ${client.playerName || clientId} in room ${roomId}`);
+    
+    // Get player order or use default order
+    const playerOrder = room.playerOrder || playerIds;
+    
+    // Calculate spinner animation
+    const totalSpins = 3 + Math.random() * 2; // 3-5 full rotations
+    const totalSteps = Math.floor(totalSpins * playerOrder.length);
+    const selectedIndex = Math.floor(Math.random() * playerOrder.length);
+    const finalStep = totalSteps + selectedIndex;
+    
+    console.log(`🎯 Spinner will land on ${room.players[playerOrder[selectedIndex]].name} after ${finalStep} steps`);
+    
+    // Send spinner start to all players
+    const spinnerData = {
+        type: 'spinner_start',
+        roomId: roomId,
+        playerOrder: playerOrder,
+        totalSteps: finalStep,
+        startedBy: client.playerName || clientId
+    };
+    
+    Object.keys(room.players).forEach(playerId => {
+        const playerClient = clients.get(playerId);
+        if (playerClient && playerClient.ws.readyState === WebSocket.OPEN) {
+            playerClient.ws.send(JSON.stringify(spinnerData));
+        }
+    });
+    
+    // Start the spinner animation
+    startSpinnerAnimation(roomId, playerOrder, finalStep);
+}
+
+// Handle setting player order for spinner
+function handleSetPlayerOrder(clientId, message) {
+    const client = clients.get(clientId);
+    if (!client || !client.roomId) return;
+    
+    const roomId = client.roomId;
+    const room = rooms[roomId];
+    if (!room) return;
+    
+    const { playerOrder } = message;
+    
+    if (playerOrder && Array.isArray(playerOrder)) {
+        // Validate that all players in order exist in room
+        const validOrder = playerOrder.filter(playerId => room.players[playerId]);
+        
+        if (validOrder.length === Object.keys(room.players).length) {
+            room.playerOrder = validOrder;
+            console.log(`📋 Player order set in room ${roomId}: ${validOrder.map(id => room.players[id].name).join(' → ')}`);
+            
+            // Broadcast new order to all players
+            const orderUpdate = {
+                type: 'player_order_update',
+                roomId: roomId,
+                playerOrder: validOrder,
+                orderNames: validOrder.map(id => room.players[id].name)
+            };
+            
+            Object.keys(room.players).forEach(playerId => {
+                const playerClient = clients.get(playerId);
+                if (playerClient && playerClient.ws.readyState === WebSocket.OPEN) {
+                    playerClient.ws.send(JSON.stringify(orderUpdate));
+                }
+            });
+        }
+    }
+}
+
+// Animate the spinner
+function startSpinnerAnimation(roomId, playerOrder, finalStep) {
+    const room = rooms[roomId];
+    if (!room) return;
+    
+    let currentStep = 0;
+    let currentPlayerIndex = 0;
+    
+    // Start fast, slow down gradually
+    let interval = 100; // Start at 100ms
+    const maxInterval = 800; // End at 800ms
+    
+    function spinStep() {
+        if (currentStep >= finalStep) {
+            // Spinner finished - announce winner
+            const winnerPlayerId = playerOrder[currentPlayerIndex];
+            const winner = room.players[winnerPlayerId];
+            
+            console.log(`🏆 Spinner finished! Winner: ${winner.name} (${winnerPlayerId})`);
+            
+            const winnerData = {
+                type: 'spinner_result',
+                roomId: roomId,
+                winnerId: winnerPlayerId,
+                winnerName: winner.name,
+                message: `🎯 ${winner.name} ble valgt!`
+            };
+            
+            Object.keys(room.players).forEach(playerId => {
+                const playerClient = clients.get(playerId);
+                if (playerClient && playerClient.ws.readyState === WebSocket.OPEN) {
+                    playerClient.ws.send(JSON.stringify(winnerData));
+                }
+            });
+            
+            return;
+        }
+        
+        // Current highlighted player
+        const currentPlayerId = playerOrder[currentPlayerIndex];
+        
+        // Send highlight to all players
+        const highlightData = {
+            type: 'spinner_highlight',
+            roomId: roomId,
+            highlightedPlayerId: currentPlayerId,
+            step: currentStep,
+            totalSteps: finalStep
+        };
+        
+        Object.keys(room.players).forEach(playerId => {
+            const playerClient = clients.get(playerId);
+            if (playerClient && playerClient.ws.readyState === WebSocket.OPEN) {
+                playerClient.ws.send(JSON.stringify(highlightData));
+            }
+        });
+        
+        // Move to next player
+        currentStep++;
+        currentPlayerIndex = (currentPlayerIndex + 1) % playerOrder.length;
+        
+        // Slow down gradually
+        const progress = currentStep / finalStep;
+        interval = Math.floor(100 + (maxInterval - 100) * Math.pow(progress, 2));
+        
+        // Schedule next step
+        setTimeout(spinStep, interval);
+    }
+    
+    // Start the animation
+    spinStep();
+}
     const { targetClientId, targetId, action } = message;
     const target = targetClientId || targetId;
     
@@ -255,8 +496,8 @@ function handleLedControl(clientId, message) {
     }
 }
 
-// Broadcast room update to all players in room
-function broadcastRoomUpdate(roomId) {
+// Remove player from room
+function removePlayerFromRoom(clientId, roomId) {
     const room = rooms[roomId];
     if (!room) return;
     
@@ -284,8 +525,8 @@ function broadcastRoomUpdate(roomId) {
     console.log(`🔄 Room update sent to ${playersList.length} players in room ${roomId}`);
 }
 
-// Remove player from room
-function removePlayerFromRoom(clientId, roomId) {
+// Handle LED control
+function handleLedControl(clientId, message) {
     if (!rooms[roomId]) return;
     
     const room = rooms[roomId];
@@ -335,13 +576,28 @@ setInterval(() => {
     const activeClients = Array.from(clients.values()).filter(c => c.ws.readyState === WebSocket.OPEN);
     const activeRooms = Object.keys(rooms).length;
     
-    console.log(`📊 Status: ${activeClients.length} aktive klienter, ${activeRooms} aktive rom`);
+    console.log(`\n📊 Status: ${activeClients.length} aktive klienter, ${activeRooms} aktive rom`);
     
     if (activeRooms > 0) {
         Object.entries(rooms).forEach(([roomId, room]) => {
             const playerNames = Object.values(room.players).map(p => p.name).join(', ');
-            console.log(`  🏠 Rom ${roomId}: ${playerNames}`);
+            console.log(`  🏠 Rom ${roomId}: ${playerNames} (${Object.keys(room.players).length} spillere)`);
         });
+    } else {
+        console.log(`  📭 Ingen aktive rom`);
+    }
+    
+    // Clean up any stale connections
+    let cleanedUp = 0;
+    clients.forEach((client, clientId) => {
+        if (client.ws.readyState !== WebSocket.OPEN) {
+            handleClientDisconnect(clientId);
+            cleanedUp++;
+        }
+    });
+    
+    if (cleanedUp > 0) {
+        console.log(`🧹 Cleaned up ${cleanedUp} stale connections`);
     }
 }, 30000);
 
