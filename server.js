@@ -302,7 +302,11 @@ function handleStartSpinner(clientId, message) {
     const selectedIndex = Math.floor(Math.random() * playerOrder.length);
     const finalStep = totalSteps + selectedIndex;
     
+    // Get winner duration from message or default to 5 seconds
+    const winnerDuration = (message.winnerDuration || 5) * 1000; // Convert to milliseconds
+    
     console.log(`🎯 Spinner will land on ${room.players[playerOrder[selectedIndex]].name} after ${finalStep} steps`);
+    console.log(`⏱️ Winner will be highlighted for ${winnerDuration/1000} seconds`);
     
     // Send spinner start to all players
     const spinnerData = {
@@ -310,7 +314,8 @@ function handleStartSpinner(clientId, message) {
         roomId: roomId,
         playerOrder: playerOrder,
         totalSteps: finalStep,
-        startedBy: client.playerName || clientId
+        startedBy: client.playerName || clientId,
+        winnerDuration: winnerDuration
     };
     
     Object.keys(room.players).forEach(playerId => {
@@ -321,7 +326,7 @@ function handleStartSpinner(clientId, message) {
     });
     
     // Start the spinner animation
-    startSpinnerAnimation(roomId, playerOrder, finalStep);
+    startSpinnerAnimation(roomId, playerOrder, finalStep, winnerDuration);
 }
 
 // Handle setting player order for spinner
@@ -362,7 +367,7 @@ function handleSetPlayerOrder(clientId, message) {
 }
 
 // Animate the spinner
-function startSpinnerAnimation(roomId, playerOrder, finalStep) {
+function startSpinnerAnimation(roomId, playerOrder, finalStep, winnerDuration) {
     const room = rooms[roomId];
     if (!room) return;
     
@@ -375,18 +380,21 @@ function startSpinnerAnimation(roomId, playerOrder, finalStep) {
     
     function spinStep() {
         if (currentStep >= finalStep) {
-            // Spinner finished - announce winner
+            // Spinner finished - announce winner with duration
             const winnerPlayerId = playerOrder[currentPlayerIndex];
             const winner = room.players[winnerPlayerId];
             
             console.log(`🏆 Spinner finished! Winner: ${winner.name} (${winnerPlayerId})`);
+            console.log(`💡 Winner will be highlighted for ${winnerDuration/1000} seconds`);
             
+            // Send winner announcement to all players
             const winnerData = {
                 type: 'spinner_result',
                 roomId: roomId,
                 winnerId: winnerPlayerId,
                 winnerName: winner.name,
-                message: `🎯 ${winner.name} ble valgt!`
+                message: `🎯 ${winner.name} ble valgt!`,
+                winnerDuration: winnerDuration
             };
             
             Object.keys(room.players).forEach(playerId => {
@@ -396,29 +404,38 @@ function startSpinnerAnimation(roomId, playerOrder, finalStep) {
                 }
             });
             
+            // Send LED command to winner only
+            const winnerClient = clients.get(winnerPlayerId);
+            if (winnerClient && winnerClient.ws.readyState === WebSocket.OPEN) {
+                winnerClient.ws.send(JSON.stringify({
+                    type: 'led_command',
+                    action: 'winner_highlight',
+                    duration: winnerDuration,
+                    from: 'spinner',
+                    fromName: 'Spinner',
+                    timestamp: Date.now()
+                }));
+            }
+            
             return;
         }
         
         // Current highlighted player
         const currentPlayerId = playerOrder[currentPlayerIndex];
         
-        // Send highlight to all players
+        // Send highlight to all players (visual only, no LED)
         Object.keys(room.players).forEach(playerId => {
             const playerClient = clients.get(playerId);
             if (playerClient && playerClient.ws.readyState === WebSocket.OPEN) {
                 
-                // Create highlight data with LED command included
                 const highlightData = {
                     type: 'spinner_highlight',
                     roomId: roomId,
                     highlightedPlayerId: currentPlayerId,
                     step: currentStep,
-                    totalSteps: finalStep,
-                    // Include LED action for this player
-                    ledAction: playerId === currentPlayerId ? 'spinner_highlight' : 'spinner_tick'
+                    totalSteps: finalStep
                 };
                 
-                // Send single message with both highlight and LED info
                 playerClient.ws.send(JSON.stringify(highlightData));
             }
         });
