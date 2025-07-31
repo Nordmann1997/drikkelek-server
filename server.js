@@ -54,6 +54,13 @@ wss.on('connection', (ws) => {
                 case 'ping':
                     ws.send(JSON.stringify({ type: 'pong' }));
                     break;
+                // NYE BOMBESPILL HANDLERS
+                case 'roll_dice':
+                    handleRollDice(clientId, message);
+                    break;
+                case 'use_bomb':
+                    handleUseBomb(clientId, message);
+                    break;
                 default:
                     sendError(clientId, `Ukjent meldingstype: ${message.type}`);
             }
@@ -74,7 +81,7 @@ function handleCreateRoom(clientId, message) {
     const { roomId, playerName, avatar } = message;
     if (!roomId || !playerName) return sendError(clientId, "Mangler informasjon for å opprette rom.");
     if (rooms[roomId]) return sendError(clientId, `Rom ${roomId} eksisterer allerede.`);
-    rooms[roomId] = { id: roomId, hostId: clientId, players: {} };
+    rooms[roomId] = { id: roomId, hostId: clientId, players: {}, gameSettings: null, currentGame: null };
     console.log(`🏠 Rom opprettet: ${roomId} av host ${clientId}`);
     addPlayerToRoom(clientId, roomId, playerName, true, avatar);
 }
@@ -87,12 +94,41 @@ function handleJoinRoom(clientId, message) {
 }
 
 function handleStartGame(clientId, message) {
-    const { roomId, gameType } = message;
+    const { roomId, gameType, gameSettings } = message;
     const clientInfo = clients.get(clientId);
     if (!clientInfo || !clientInfo.isHost) return sendError(clientId, "Kun host kan starte et spill.");
     if (!roomId || !gameType) return sendError(clientId, "Mangler informasjon for å starte spillet.");
-    console.log(`🎮 Host ${clientInfo.playerName} starter spillet '${gameType}' i rom ${roomId}.`);
-    broadcastToRoom(roomId, { type: 'game_started', gameType }, clientId);
+    
+    const room = rooms[roomId];
+    if (!room) return sendError(clientId, "Rom finnes ikke.");
+    
+    // Lagre spillinnstillinger og spilltype
+    room.gameSettings = gameSettings || {};
+    room.currentGame = gameType;
+    
+    console.log(`🎮 Host ${clientInfo.playerName} starter spillet '${gameType}' i rom ${roomId} med innstillinger:`, gameSettings);
+    
+    // Initialiser spill-spesifikk data
+    if (gameType === 'bomb_game') {
+        initializeBombGame(room);
+    }
+    
+    // Send game_started med spillerdata
+    const playersData = Object.values(room.players).map(p => ({
+        id: p.id,
+        name: p.name,
+        avatar: p.avatar,
+        isHost: p.isHost,
+        points: p.points || 0,
+        diceValue: p.diceValue || 1,
+        hasBomb: p.hasBomb || false
+    }));
+    
+    broadcastToRoom(roomId, { 
+        type: 'game_started', 
+        gameType,
+        players: playersData
+    });
 }
 
 function handleLeaveRoom(clientId) {
@@ -108,7 +144,186 @@ function handleClientDisconnect(clientId) {
     console.log(`🧹 Klient-data for ${clientId} er fjernet.`);
 }
 
-// --- Spill-logikk ---
+// --- Bombespill-logikk ---
+
+function initializeBombGame(room) {
+    console.log(`💣 Initialiserer bombespill for rom ${room.id}`);
+    
+    // Sett default verdier fra gameSettings eller fallback
+    const settings = room.gameSettings || {};
+    room.bombGameSettings = {
+        pointsForBomb: settings.pointsForBomb || 15,
+        bombDamagePercent: settings.bombDamagePercent || 50,
+        maxPoints: settings.maxPoints || 100,
+        enableWinCondition: settings.enableWinCondition !== false
+    };
+    
+    // Initialiser alle spillere
+    Object.values(room.players).forEach(player => {
+        player.points = 0;
+        player.diceValue = 1;
+        player.hasBomb = false;
+    });
+    
+    console.log(`✅ Bombespill initialisert med innstillinger:`, room.bombGameSettings);
+}
+
+function handleRollDice(clientId, message) {
+    const clientInfo = clients.get(clientId);
+    if (!clientInfo || !clientInfo.roomId) return sendError(clientId, "Må være i et rom for å kaste terning.");
+    
+    const room = rooms[clientInfo.roomId];
+    if (!room || room.currentGame !== 'bomb_game') return sendError(clientId, "Ikke i et bombespill.");
+    
+    const player = room.players[clientId];
+    if (!player) return sendError(clientId, "Spiller ikke funnet.");
+    
+    // Spilleren kan ikke kaste terning hvis de har en bombe
+    if (player.hasBomb) return sendError(clientId, "Kan ikke kaste terning når du har en bombe.");
+    
+    // Kast terning (1-6)
+    const diceValue = Math.floor(Math.random() * 6) + 1;
+    player.diceValue = diceValue;
+    player.points = (player.points || 0) + diceValue;
+    
+    console.log(`🎲 ${player.name} kastet ${diceValue}, har nå ${player.points} poeng`);
+    
+    // Send dice_rolled til alle spillere
+    const playersData = Object.values(room.players).map(p => ({
+        id: p.id,
+        name: p.name,
+        avatar: p.avatar,
+        isHost: p.isHost,
+        points: p.points || 0,
+        diceValue: p.diceValue || 1,
+        hasBomb: p.hasBomb || false
+    }));
+    
+    broadcastToRoom(room.id, {
+        type: 'dice_rolled',
+        playerId: clientId,
+        diceValue: diceValue,
+        newPoints: player.points,
+        players: playersData
+    });
+    
+    // Sjekk om spilleren skal få en bombe
+    checkForBombAvailability(room, clientId);
+    
+    // Sjekk for vinner
+    checkForWinner(room);
+}
+
+function handleUseBomb(clientId, message) {
+    const { targetId } = message;
+    const clientInfo = clients.get(clientId);
+    if (!clientInfo || !clientInfo.roomId) return sendError(clientId, "Må være i et rom for å bruke bombe.");
+    
+    const room = rooms[clientInfo.roomId];
+    if (!room || room.currentGame !== 'bomb_game') return sendError(clientId, "Ikke i et bombespill.");
+    
+    const bomber = room.players[clientId];
+    const target = room.players[targetId];
+    
+    if (!bomber || !target) return sendError(clientId, "Spiller ikke funnet.");
+    if (!bomber.hasBomb) return sendError(clientId, "Du har ikke en bombe.");
+    if (targetId === clientId) return sendError(clientId, "Kan ikke bombe seg selv.");
+    
+    console.log(`💥 ${bomber.name} bomber ${target.name}!`);
+    
+    // Beregn skade
+    const damage = Math.floor((target.points || 0) * (room.bombGameSettings.bombDamagePercent / 100));
+    target.points = Math.max(0, (target.points || 0) - damage);
+    
+    // Fjern bomben fra bomberen
+    bomber.hasBomb = false;
+    
+    console.log(`💔 ${target.name} mister ${damage} poeng og har nå ${target.points} poeng`);
+    
+    // Send bomb_used til alle spillere
+    const playersData = Object.values(room.players).map(p => ({
+        id: p.id,
+        name: p.name,
+        avatar: p.avatar,
+        isHost: p.isHost,
+        points: p.points || 0,
+        diceValue: p.diceValue || 1,
+        hasBomb: p.hasBomb || false
+    }));
+    
+    broadcastToRoom(room.id, {
+        type: 'bomb_used',
+        bomberId: clientId,
+        targetId: targetId,
+        damage: damage,
+        targetNewPoints: target.points,
+        players: playersData
+    });
+}
+
+function checkForBombAvailability(room, playerId) {
+    const player = room.players[playerId];
+    if (!player || !room.bombGameSettings) return false;
+    
+    // Sjekk om spilleren har nok poeng for bombe og ikke allerede har en
+    if (player.points >= room.bombGameSettings.pointsForBomb && !player.hasBomb) {
+        player.hasBomb = true;
+        player.points = 0; // Reset poeng når man får bombe
+        
+        console.log(`💣 ${player.name} har fått en bombe!`);
+        
+        const playersData = Object.values(room.players).map(p => ({
+            id: p.id,
+            name: p.name,
+            avatar: p.avatar,
+            isHost: p.isHost,
+            points: p.points || 0,
+            diceValue: p.diceValue || 1,
+            hasBomb: p.hasBomb || false
+        }));
+        
+        broadcastToRoom(room.id, {
+            type: 'bomb_available',
+            playerId: playerId,
+            players: playersData
+        });
+        
+        return true;
+    }
+    
+    return false;
+}
+
+function checkForWinner(room) {
+    if (!room.bombGameSettings || !room.bombGameSettings.enableWinCondition) return null;
+    
+    const winner = Object.values(room.players).find(p => (p.points || 0) >= room.bombGameSettings.maxPoints);
+    if (winner) {
+        console.log(`🏆 ${winner.name} vant spillet med ${winner.points} poeng!`);
+        
+        const playersData = Object.values(room.players).map(p => ({
+            id: p.id,
+            name: p.name,
+            avatar: p.avatar,
+            isHost: p.isHost,
+            points: p.points || 0,
+            diceValue: p.diceValue || 1,
+            hasBomb: p.hasBomb || false
+        }));
+        
+        broadcastToRoom(room.id, {
+            type: 'game_winner',
+            winnerId: winner.id,
+            players: playersData
+        });
+        
+        return winner;
+    }
+    
+    return null;
+}
+
+// --- Spinner spill-logikk (eksisterende) ---
 
 function handleLedControl(clientId, message) {
     const { targetClientId, action } = message;
@@ -165,7 +380,15 @@ function addPlayerToRoom(clientId, roomId, playerName, isHost, avatar) {
     const clientInfo = clients.get(clientId);
     if (!clientInfo || !rooms[roomId]) return;
     Object.assign(clientInfo, { roomId, playerName, isHost, avatar });
-    rooms[roomId].players[clientId] = { id: clientId, name: playerName, isHost, avatar };
+    rooms[roomId].players[clientId] = { 
+        id: clientId, 
+        name: playerName, 
+        isHost, 
+        avatar,
+        points: 0,
+        diceValue: 1,
+        hasBomb: false
+    };
     console.log(`👤 ${playerName} (${clientId}) ble med i rom ${roomId} med avatar.`);
     sendToClient(clientId, { type: 'room_joined', roomId });
     const playersList = Object.values(rooms[roomId].players);
