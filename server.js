@@ -239,7 +239,16 @@ function handleUseBomb(clientId, message) {
     // Fjern bomben fra bomberen
     bomber.hasBomb = false;
     
+    // NY LOGIKK: Øk poengterskel progressivt
+    if (!room.bombUseCount) room.bombUseCount = 0;
+    room.bombUseCount++;
+    
+    // Øk terskel med originalverdien for hver gang en bombe brukes
+    const originalThreshold = room.gameSettings?.pointsForBomb || 15;
+    room.bombGameSettings.pointsForBomb = originalThreshold + (originalThreshold * room.bombUseCount);
+    
     console.log(`💔 ${target.name} mister ${damage} poeng og har nå ${target.points} poeng`);
+    console.log(`📈 Bombeterskel økt til ${room.bombGameSettings.pointsForBomb} poeng (bruk #${room.bombUseCount})`);
     
     // Send bomb_used til alle spillere
     const playersData = Object.values(room.players).map(p => ({
@@ -258,6 +267,8 @@ function handleUseBomb(clientId, message) {
         targetId: targetId,
         damage: damage,
         targetNewPoints: target.points,
+        newBombThreshold: room.bombGameSettings.pointsForBomb, // NY: Send nye terskel
+        bombUseCount: room.bombUseCount, // NY: Send antall bomber brukt
         players: playersData
     });
 }
