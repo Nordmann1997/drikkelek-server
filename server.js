@@ -60,6 +60,10 @@ wss.on('connection', (ws) => {
                 case 'ping': // Svarer på ping fra klienten
                     ws.send(JSON.stringify({ type: 'pong' }));
                     break;
+               case 'start_spinner':
+                     handleStartSpinner(clientId, message);
+                     break;
+
                 default:
                     console.log(`❓ Ukjent meldingstype: ${message.type}`);
                     sendError(clientId, `Ukjent meldingstype: ${message.type}`);
