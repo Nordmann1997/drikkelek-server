@@ -158,14 +158,15 @@ function initializeBombGame(room) {
         enableWinCondition: settings.enableWinCondition !== false
     };
     
-    // Initialiser alle spillere
+    // Initialiser alle spillere - SIKRE at ingen har bombe fra start
     Object.values(room.players).forEach(player => {
         player.points = 0;
         player.diceValue = 1;
-        player.hasBomb = false;
+        player.hasBomb = false; // EKSPLISITT false for alle
     });
     
     console.log(`✅ Bombespill initialisert med innstillinger:`, room.bombGameSettings);
+    console.log(`👥 Spillere initialisert:`, Object.values(room.players).map(p => `${p.name}: ${p.points}p, bomb: ${p.hasBomb}`));
 }
 
 function handleRollDice(clientId, message) {
