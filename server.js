@@ -268,9 +268,11 @@ function checkForBombAvailability(room, playerId) {
     // Sjekk om spilleren har nok poeng for bombe og ikke allerede har en
     if (player.points >= room.bombGameSettings.pointsForBomb && !player.hasBomb) {
         player.hasBomb = true;
-        player.points = 0; // Reset poeng når man får bombe
         
-        console.log(`💣 ${player.name} har fått en bombe!`);
+        // IKKE reset poeng når man får bombe - la spilleren beholde dem
+        // player.points = 0; // FJERNET DENNE LINJEN
+        
+        console.log(`💣 ${player.name} har fått en bombe! (${player.points} poeng)`);
         
         const playersData = Object.values(room.players).map(p => ({
             id: p.id,
