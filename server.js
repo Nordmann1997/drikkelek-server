@@ -54,12 +54,16 @@ wss.on('connection', (ws) => {
                 case 'ping':
                     ws.send(JSON.stringify({ type: 'pong' }));
                     break;
-                // NYE BOMBESPILL HANDLERS
+                // BOMBESPILL HANDLERS
                 case 'roll_dice':
                     handleRollDice(clientId, message);
                     break;
                 case 'use_bomb':
                     handleUseBomb(clientId, message);
+                    break;
+                // NY: RETURN TO LOBBY HANDLER
+                case 'return_to_lobby':
+                    handleReturnToLobby(clientId, message);
                     break;
                 default:
                     sendError(clientId, `Ukjent meldingstype: ${message.type}`);
@@ -74,6 +78,60 @@ wss.on('connection', (ws) => {
         handleClientDisconnect(clientId);
     });
 });
+
+// --- NYTT: Return to Lobby Handler ---
+
+function handleReturnToLobby(clientId, message) {
+    const { roomId } = message;
+    const clientInfo = clients.get(clientId);
+    
+    if (!clientInfo || !clientInfo.isHost) {
+        return sendError(clientId, "Kun host kan returnere til lobby.");
+    }
+    
+    if (!roomId) {
+        return sendError(clientId, "Mangler rom-ID for å returnere til lobby.");
+    }
+    
+    const room = rooms[roomId];
+    if (!room) {
+        return sendError(clientId, "Rom finnes ikke.");
+    }
+    
+    console.log(`🏠 Host ${clientInfo.playerName} returnerer rom ${roomId} til lobby`);
+    
+    // Reset romstatus
+    room.currentGame = null;
+    room.gameSettings = null;
+    room.bombGameSettings = null;
+    room.bombUseCount = 0;
+    
+    // Reset alle spilleres spilldata
+    Object.values(room.players).forEach(player => {
+        player.points = 0;
+        player.diceValue = 1;
+        player.hasBomb = false;
+    });
+    
+    // Send oppdatert spillerliste til alle
+    const playersData = Object.values(room.players).map(p => ({
+        id: p.id,
+        name: p.name,
+        avatar: p.avatar,
+        isHost: p.isHost,
+        points: 0,
+        diceValue: 1,
+        hasBomb: false
+    }));
+    
+    // Send "returned_to_lobby" til alle spillere i rommet
+    broadcastToRoom(roomId, {
+        type: 'returned_to_lobby',
+        players: playersData
+    });
+    
+    console.log(`✅ Rom ${roomId} er tilbake i lobby. Spillerdata resatt.`);
+}
 
 // --- Spillflyt ---
 
@@ -157,6 +215,9 @@ function initializeBombGame(room) {
         maxPoints: settings.maxPoints || 100,
         enableWinCondition: settings.enableWinCondition !== false
     };
+    
+    // Reset bomb use count
+    room.bombUseCount = 0;
     
     // Initialiser alle spillere - SIKRE at ingen har bombe fra start
     Object.values(room.players).forEach(player => {
