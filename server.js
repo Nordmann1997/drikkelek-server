@@ -3,11 +3,12 @@ const http = require('http');
 
 const PORT = process.env.PORT || 3000;
 
-const clients = new Map();
-const rooms = {};
-let clientIdCounter = 1;
+// Data Structures
+const clients = new Map(); // Lagrer info om alle tilkoblede klienter
+const rooms = {}; // Lagrer alle aktive spillrom
 
 const server = http.createServer((req, res) => {
+    // Enkel health check-endepunkt
     if (req.url === '/health') {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ 
@@ -18,41 +19,35 @@ const server = http.createServer((req, res) => {
         }));
     } else {
         res.writeHead(200, { 'Content-Type': 'text/plain' });
-        res.end('Drikkelek WebSocket Server v2.0 is running!');
+        res.end('Drikkelek WebSocket Server is running!');
     }
 });
 
 const wss = new WebSocket.Server({ server });
 
-console.log(`🚀 Drikkelek Server v2.0 startet på port ${PORT}`);
+console.log(`🚀 Drikkelek Server startet på port ${PORT}`);
 
 wss.on('connection', (ws) => {
-    const clientId = `client_${clientIdCounter++}`;
+    const clientId = `client_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
     
-    const clientInfo = {
-        ws: ws,
-        id: clientId,
-        playerName: null,
-        roomId: null,
-        connected: true,
-        joinedAt: new Date()
-    };
-    
-    clients.set(clientId, clientInfo);
+    clients.set(clientId, { ws, id: clientId });
     console.log(`✅ Ny klient tilkoblet: ${clientId}`);
 
-    ws.send(JSON.stringify({
-        type: 'connected',
-        clientId: clientId,
-        message: `Du er tilkoblet som ${clientId}`
-    }));
+    // Send bekreftelse til klienten med deres unike ID
+    ws.send(JSON.stringify({ type: 'connected', clientId }));
 
     ws.on('message', (data) => {
         try {
             const message = JSON.parse(data);
-            console.log(`📨 Melding fra ${clientId}:`, message);
+            console.log(`📨 Melding fra ${clientId}:`, message.type);
+
+            // Sjekker at klienten finnes før vi behandler meldingen
+            if (!clients.has(clientId)) return;
 
             switch (message.type) {
+                case 'create_room':
+                    handleCreateRoom(clientId, message);
+                    break;
                 case 'join_room':
                     handleJoinRoom(clientId, message);
                     break;
@@ -60,28 +55,14 @@ wss.on('connection', (ws) => {
                     handleLedControl(clientId, message);
                     break;
                 case 'leave_room':
-                    handleLeaveRoom(clientId, message);
+                    handleLeaveRoom(clientId);
                     break;
-                case 'reset_game':
-                    handleResetGame(clientId, message);
-                    break;
-                case 'start_spinner':
-                    handleStartSpinner(clientId, message);
-                    break;
-                case 'set_player_order':
-                    handleSetPlayerOrder(clientId, message);
-                    break;
-                case 'update_winner_duration':
-                    handleUpdateWinnerDuration(clientId, message);
-                    break;
-                case 'ping':
-                    ws.send(JSON.stringify({
-                        type: 'pong',
-                        timestamp: Date.now()
-                    }));
+                case 'ping': // Svarer på ping fra klienten
+                    ws.send(JSON.stringify({ type: 'pong' }));
                     break;
                 default:
                     console.log(`❓ Ukjent meldingstype: ${message.type}`);
+                    sendError(clientId, `Ukjent meldingstype: ${message.type}`);
             }
         } catch (error) {
             console.error(`❌ Feil ved parsing av melding fra ${clientId}:`, error);
@@ -89,441 +70,226 @@ wss.on('connection', (ws) => {
     });
 
     ws.on('close', () => {
-        console.log(`❌ Klient frakoblet: ${clientId}`);
+        console.log(`🔌 Klient frakoblet: ${clientId}`);
         handleClientDisconnect(clientId);
     });
 
     ws.on('error', (error) => {
         console.error(`💥 WebSocket feil for ${clientId}:`, error);
-        handleClientDisconnect(clientId);
     });
 });
 
-function handleClientDisconnect(clientId) {
-    const client = clients.get(clientId);
-    
-    if (client) {
-        if (client.roomId && rooms[client.roomId]) {
-            removePlayerFromRoom(clientId, client.roomId);
-        }
-        clients.delete(clientId);
-        console.log(`🧹 Cleaned up client ${clientId}`);
+// --- Kjernefunksjoner ---
+
+function handleCreateRoom(clientId, message) {
+    const { roomId, playerName } = message;
+    if (!roomId || !playerName) {
+        return sendError(clientId, "Mangler 'roomId' eller 'playerName' for å opprette rom.");
     }
+
+    if (rooms[roomId]) {
+        return sendError(clientId, `Rom ${roomId} eksisterer allerede. Prøv en annen kode.`);
+    }
+
+    // Opprett det nye rommet
+    rooms[roomId] = {
+        id: roomId,
+        hostId: clientId,
+        players: {},
+        createdAt: new Date(),
+    };
+    console.log(`🏠 Rom opprettet: ${roomId} av host ${clientId}`);
+    
+    // Legg til spilleren i rommet og clients-map
+    addPlayerToRoom(clientId, roomId, playerName, true);
 }
 
 function handleJoinRoom(clientId, message) {
     const { roomId, playerName } = message;
-    
     if (!roomId || !playerName) {
-        return;
+        return sendError(clientId, "Mangler 'roomId' eller 'playerName' for å bli med i rom.");
     }
-    
-    const client = clients.get(clientId);
-    if (!client) return;
-    
-    client.playerName = playerName;
-    client.roomId = roomId;
-    
+
     if (!rooms[roomId]) {
-        rooms[roomId] = {
-            id: roomId,
-            players: {},
-            createdAt: new Date(),
-            winnerDuration: 5
-        };
-        console.log(`🏠 Created new room: ${roomId}`);
+        return sendError(clientId, `Rom ${roomId} finnes ikke. Sjekk koden og prøv igjen.`);
     }
     
-    rooms[roomId].players[clientId] = {
-        id: clientId,
-        name: playerName,
-        joinedAt: new Date()
-    };
-    
-    console.log(`👤 ${playerName} (${clientId}) joined room ${roomId}`);
-    
-    client.ws.send(JSON.stringify({
-        type: 'room_joined',
-        roomId: roomId,
-        playerName: playerName,
-        message: `Du ble med i rom ${roomId} som ${playerName}`
-    }));
-    
-    broadcastRoomUpdate(roomId);
-}
+    // Sjekk om rommet er fullt (valgfri funksjonalitet)
+    // if (Object.keys(rooms[roomId].players).length >= MAX_PLAYERS) {
+    //     return sendError(clientId, `Rom ${roomId} er fullt.`);
+    // }
 
-function handleLeaveRoom(clientId, message) {
-    const client = clients.get(clientId);
-    if (!client || !client.roomId) {
-        return;
-    }
-    
-    const roomId = client.roomId;
-    removePlayerFromRoom(clientId, roomId);
-    client.roomId = null;
-    
-    client.ws.send(JSON.stringify({
-        type: 'left_room',
-        roomId: roomId,
-        message: `Du forlot rom ${roomId}`
-    }));
-    
-    console.log(`👋 ${client.playerName || clientId} manually left room ${roomId}`);
-}
-
-function handleResetGame(clientId, message) {
-    const client = clients.get(clientId);
-    if (!client || !client.roomId) return;
-    
-    const roomId = client.roomId;
-    const room = rooms[roomId];
-    if (!room) return;
-    
-    console.log(`🔄 Game reset requested by ${client.playerName || clientId} in room ${roomId}`);
-    
-    const resetMessage = JSON.stringify({
-        type: 'game_reset',
-        roomId: roomId,
-        resetBy: client.playerName || clientId,
-        message: `Spillet ble nullstilt av ${client.playerName || clientId}`
-    });
-    
-    Object.keys(room.players).forEach(playerId => {
-        const playerClient = clients.get(playerId);
-        if (playerClient && playerClient.ws.readyState === WebSocket.OPEN) {
-            playerClient.ws.send(resetMessage);
-        }
-    });
-}
-
-function handleStartSpinner(clientId, message) {
-    const client = clients.get(clientId);
-    if (!client || !client.roomId) return;
-    
-    const roomId = client.roomId;
-    const room = rooms[roomId];
-    if (!room) return;
-    
-    const playerIds = Object.keys(room.players);
-    if (playerIds.length < 2) {
-        client.ws.send(JSON.stringify({
-            type: 'spinner_error',
-            message: 'Trenger minst 2 spillere for å spinne'
-        }));
-        return;
-    }
-    
-    console.log(`🎰 Spinner started by ${client.playerName || clientId} in room ${roomId}`);
-    
-    const playerOrder = room.playerOrder || playerIds;
-    const totalSpins = 3 + Math.random() * 2;
-    const totalSteps = Math.floor(totalSpins * playerOrder.length);
-    const selectedIndex = Math.floor(Math.random() * playerOrder.length);
-    const finalStep = totalSteps + selectedIndex;
-    
-    const winnerDuration = (message.winnerDuration || room.winnerDuration || 5) * 1000;
-    
-    console.log(`🎯 Spinner will land on ${room.players[playerOrder[selectedIndex]].name} after ${finalStep} steps`);
-    
-    const spinnerData = {
-        type: 'spinner_start',
-        roomId: roomId,
-        playerOrder: playerOrder,
-        totalSteps: finalStep,
-        startedBy: client.playerName || clientId,
-        winnerDuration: winnerDuration
-    };
-    
-    Object.keys(room.players).forEach(playerId => {
-        const playerClient = clients.get(playerId);
-        if (playerClient && playerClient.ws.readyState === WebSocket.OPEN) {
-            playerClient.ws.send(JSON.stringify(spinnerData));
-        }
-    });
-    
-    startSpinnerAnimation(roomId, playerOrder, finalStep, winnerDuration);
-}
-
-function handleSetPlayerOrder(clientId, message) {
-    const client = clients.get(clientId);
-    if (!client || !client.roomId) return;
-    
-    const roomId = client.roomId;
-    const room = rooms[roomId];
-    if (!room) return;
-    
-    const { playerOrder } = message;
-    
-    if (playerOrder && Array.isArray(playerOrder)) {
-        const validOrder = playerOrder.filter(playerId => room.players[playerId]);
-        
-        if (validOrder.length === Object.keys(room.players).length) {
-            room.playerOrder = validOrder;
-            console.log(`📋 Player order set in room ${roomId}`);
-            
-            const orderUpdate = {
-                type: 'player_order_update',
-                roomId: roomId,
-                playerOrder: validOrder,
-                orderNames: validOrder.map(id => room.players[id].name)
-            };
-            
-            Object.keys(room.players).forEach(playerId => {
-                const playerClient = clients.get(playerId);
-                if (playerClient && playerClient.ws.readyState === WebSocket.OPEN) {
-                    playerClient.ws.send(JSON.stringify(orderUpdate));
-                }
-            });
-        }
-    }
-}
-
-function handleUpdateWinnerDuration(clientId, message) {
-    const client = clients.get(clientId);
-    if (!client || !client.roomId) return;
-    
-    const roomId = client.roomId;
-    const room = rooms[roomId];
-    if (!room) return;
-    
-    const { winnerDuration } = message;
-    
-    if (typeof winnerDuration === 'number' && winnerDuration > 0) {
-        room.winnerDuration = winnerDuration;
-        
-        console.log(`⏱️ Winner duration updated to ${winnerDuration}s in room ${roomId}`);
-        
-        const durationUpdate = {
-            type: 'winner_duration_update',
-            roomId: roomId,
-            winnerDuration: winnerDuration,
-            updatedBy: client.playerName || clientId
-        };
-        
-        Object.keys(room.players).forEach(playerId => {
-            if (playerId !== clientId) {
-                const playerClient = clients.get(playerId);
-                if (playerClient && playerClient.ws.readyState === WebSocket.OPEN) {
-                    playerClient.ws.send(JSON.stringify(durationUpdate));
-                }
-            }
-        });
-    }
-}
-
-function startSpinnerAnimation(roomId, playerOrder, finalStep, winnerDuration) {
-    const room = rooms[roomId];
-    if (!room) return;
-    
-    let currentStep = 0;
-    let currentPlayerIndex = 0;
-    let interval = 100;
-    const maxInterval = 800;
-    
-    function spinStep() {
-        if (currentStep >= finalStep) {
-            const winnerPlayerId = playerOrder[currentPlayerIndex];
-            const winner = room.players[winnerPlayerId];
-            
-            console.log(`🏆 Spinner finished! Winner: ${winner.name}`);
-            
-            const winnerData = {
-                type: 'spinner_result',
-                roomId: roomId,
-                winnerId: winnerPlayerId,
-                winnerName: winner.name,
-                message: `🎯 ${winner.name} ble valgt!`,
-                winnerDuration: winnerDuration
-            };
-            
-            Object.keys(room.players).forEach(playerId => {
-                const playerClient = clients.get(playerId);
-                if (playerClient && playerClient.ws.readyState === WebSocket.OPEN) {
-                    playerClient.ws.send(JSON.stringify(winnerData));
-                }
-            });
-            
-            const winnerClient = clients.get(winnerPlayerId);
-            if (winnerClient && winnerClient.ws.readyState === WebSocket.OPEN) {
-                winnerClient.ws.send(JSON.stringify({
-                    type: 'led_command',
-                    action: 'winner_highlight',
-                    duration: winnerDuration,
-                    from: 'spinner',
-                    fromName: 'Spinner',
-                    timestamp: Date.now()
-                }));
-            }
-            
-            return;
-        }
-        
-        const currentPlayerId = playerOrder[currentPlayerIndex];
-        
-        Object.keys(room.players).forEach(playerId => {
-            const playerClient = clients.get(playerId);
-            if (playerClient && playerClient.ws.readyState === WebSocket.OPEN) {
-                
-                const highlightData = {
-                    type: 'spinner_highlight',
-                    roomId: roomId,
-                    highlightedPlayerId: currentPlayerId,
-                    step: currentStep,
-                    totalSteps: finalStep
-                };
-                
-                playerClient.ws.send(JSON.stringify(highlightData));
-            }
-        });
-        
-        currentStep++;
-        currentPlayerIndex = (currentPlayerIndex + 1) % playerOrder.length;
-        
-        const progress = currentStep / finalStep;
-        interval = Math.floor(100 + (maxInterval - 100) * Math.pow(progress, 2));
-        
-        setTimeout(spinStep, interval);
-    }
-    
-    spinStep();
+    // Legg til spilleren i rommet
+    addPlayerToRoom(clientId, roomId, playerName, false);
 }
 
 function handleLedControl(clientId, message) {
-    const { targetClientId, targetId, action } = message;
-    const target = targetClientId || targetId;
-    
-    console.log(`💡 LED kontroll: ${clientId} vil ${action} LED på ${target}`);
-    
-    const senderClient = clients.get(clientId);
-    if (!senderClient) return;
-    
-    if (target === 'all') {
-        if (senderClient.roomId && rooms[senderClient.roomId]) {
-            const room = rooms[senderClient.roomId];
-            
-            Object.keys(room.players).forEach(playerId => {
-                if (playerId !== clientId) {
-                    const targetClient = clients.get(playerId);
-                    if (targetClient && targetClient.ws.readyState === WebSocket.OPEN) {
-                        targetClient.ws.send(JSON.stringify({
-                            type: 'led_command',
-                            action: action,
-                            from: clientId,
-                            fromName: senderClient.playerName || clientId,
-                            timestamp: Date.now()
-                        }));
-                    }
-                }
-            });
-        }
-    } else {
-        const targetClient = clients.get(target);
-        
-        if (!targetClient) {
-            senderClient.ws.send(JSON.stringify({
-                type: 'error',
-                message: `Klient ${target} ikke funnet`
-            }));
-            return;
-        }
+    const { targetClientId, action } = message;
+    const clientInfo = clients.get(clientId);
 
-        targetClient.ws.send(JSON.stringify({
-            type: 'led_command',
-            action: action,
-            from: clientId,
-            fromName: senderClient.playerName || clientId,
-            timestamp: Date.now()
-        }));
+    if (!clientInfo || !clientInfo.roomId) {
+        return sendError(clientId, "Du må være i et rom for å kontrollere LED.");
+    }
+    
+    const roomId = clientInfo.roomId;
+    const room = rooms[roomId];
 
-        senderClient.ws.send(JSON.stringify({
-            type: 'led_control_sent',
-            targetClientId: target,
-            action: action,
-            message: `LED ${action} kommando sendt til ${targetClient.playerName || target}`
-        }));
+    if (!room || room.hostId !== clientId) {
+        return sendError(clientId, "Kun host kan sende LED-kommandoer.");
+    }
+    
+    const command = {
+        type: 'led_command',
+        action: action,
+        fromName: clientInfo.playerName,
+    };
+    
+    // Send til alle i rommet
+    if (targetClientId === 'all') {
+        console.log(`💡 Host ${clientInfo.playerName} sender '${action}' til alle i rom ${roomId}`);
+        Object.keys(room.players).forEach(pId => {
+            // Unngå å sende til hosten selv, da handlingen utføres lokalt
+            if (pId !== clientId) { 
+                sendToClient(pId, command);
+            }
+        });
+    } 
+    // Send til en spesifikk spiller
+    else if (room.players[targetClientId]) {
+        console.log(`💡 Host ${clientInfo.playerName} sender '${action}' til ${targetClientId} i rom ${roomId}`);
+        sendToClient(targetClientId, command);
+    }
+}
+
+function handleLeaveRoom(clientId) {
+    const clientInfo = clients.get(clientId);
+    if (!clientInfo || !clientInfo.roomId) return;
+    
+    removePlayerFromRoom(clientId, clientInfo.roomId);
+}
+
+function handleClientDisconnect(clientId) {
+    handleLeaveRoom(clientId); // Samme logikk som å forlate et rom manuelt
+    clients.delete(clientId);
+    console.log(`🧹 Klient-data for ${clientId} er fjernet.`);
+}
+
+
+// --- Hjelpefunksjoner ---
+
+function addPlayerToRoom(clientId, roomId, playerName, isHost) {
+    const clientInfo = clients.get(clientId);
+    if (!clientInfo) return;
+
+    // Oppdater info i clients-map
+    clientInfo.roomId = roomId;
+    clientInfo.playerName = playerName;
+    clientInfo.isHost = isHost;
+
+    // Legg spilleren til i rom-objektet
+    rooms[roomId].players[clientId] = {
+        id: clientId,
+        name: playerName,
+        isHost: isHost,
+    };
+
+    console.log(`👤 ${playerName} (${clientId}) ble med i rom ${roomId}. Host: ${isHost}`);
+    
+    // Send bekreftelse til spilleren
+    sendToClient(clientId, { type: 'room_joined', roomId });
+    
+    // Send oppdatert spillerliste til alle i rommet
+    broadcastRoomUpdate(roomId);
+}
+
+function removePlayerFromRoom(clientId, roomId) {
+    if (!rooms[roomId] || !rooms[roomId].players[clientId]) return;
+
+    const playerWasHost = rooms[roomId].hostId === clientId;
+    const playerName = rooms[roomId].players[clientId].name;
+    
+    console.log(`👋 ${playerName} forlater rom ${roomId}.`);
+    delete rooms[roomId].players[clientId];
+
+    // Hvis host forlater, steng hele rommet
+    if (playerWasHost) {
+        console.log(`HOST FORLOT: Stenger rom ${roomId}.`);
+        const roomClosedMessage = {
+            type: 'error',
+            message: `Host (${playerName}) forlot spillet. Rommet er stengt.`,
+        };
+        // Send melding til gjenværende spillere før rommet slettes
+        Object.keys(rooms[roomId].players).forEach(pId => {
+            sendToClient(pId, roomClosedMessage);
+            const pInfo = clients.get(pId);
+            if(pInfo) {
+                pInfo.roomId = null;
+                pInfo.isHost = false;
+            }
+        });
+        delete rooms[roomId];
+    } 
+    // Hvis en vanlig spiller forlater, bare oppdater de andre
+    else if (Object.keys(rooms[roomId].players).length > 0) {
+        broadcastRoomUpdate(roomId);
+    } 
+    // Hvis det var den siste spilleren, slett rommet
+    else {
+        console.log(`🗑️ Sletter tomt rom: ${roomId}`);
+        delete rooms[roomId];
     }
 }
 
 function broadcastRoomUpdate(roomId) {
+    if (!rooms[roomId]) return;
+
     const room = rooms[roomId];
-    if (!room) return;
-    
-    const playersList = Object.values(room.players).map(player => ({
-        id: player.id,
-        name: player.name,
-        joinedAt: player.joinedAt
-    }));
-    
-    const updateMessage = JSON.stringify({
+    const playersList = Object.values(room.players); // Inneholder nå id, name, isHost
+
+    const updateMessage = {
         type: 'room_update',
         roomId: roomId,
         players: playersList,
-        playerCount: playersList.length
-    });
+    };
     
-    Object.keys(room.players).forEach(playerId => {
-        const client = clients.get(playerId);
-        if (client && client.ws.readyState === WebSocket.OPEN) {
-            client.ws.send(updateMessage);
-        }
-    });
+    console.log(`🔄 Sender rom-oppdatering til ${playersList.length} spillere i rom ${roomId}`);
     
-    console.log(`🔄 Room update sent to ${playersList.length} players in room ${roomId}`);
+    playersList.forEach(player => {
+        sendToClient(player.id, updateMessage);
+    });
 }
 
-function removePlayerFromRoom(clientId, roomId) {
-    if (!rooms[roomId]) return;
-    
-    const room = rooms[roomId];
-    const player = room.players[clientId];
-    
-    if (player) {
-        delete room.players[clientId];
-        console.log(`👋 ${player.name} left room ${roomId}`);
-        
-        if (Object.keys(room.players).length === 0) {
-            delete rooms[roomId];
-            console.log(`🗑️ Deleted empty room ${roomId}`);
-        } else {
-            broadcastRoomUpdate(roomId);
-        }
+function sendToClient(clientId, message) {
+    const client = clients.get(clientId);
+    if (client && client.ws.readyState === WebSocket.OPEN) {
+        client.ws.send(JSON.stringify(message));
     }
 }
+
+function sendError(clientId, errorMessage) {
+    console.log(`❌ Sender feilmelding til ${clientId}: ${errorMessage}`);
+    sendToClient(clientId, {
+        type: 'error',
+        message: errorMessage,
+    });
+}
+
+// Regelmessig opprydding av "døde" tilkoblinger
+setInterval(() => {
+    let cleanedCount = 0;
+    clients.forEach((client, clientId) => {
+        if (client.ws.readyState !== WebSocket.OPEN && client.ws.readyState !== WebSocket.CONNECTING) {
+            console.log(`🧹 Renser opp inaktiv tilkobling for ${clientId}`);
+            handleClientDisconnect(clientId);
+            cleanedCount++;
+        }
+    });
+    if (cleanedCount > 0) {
+        console.log(`✨ Ryddet opp ${cleanedCount} inaktive tilkoblinger.`);
+    }
+}, 30000); // Kjører hvert 30. sekund
+
 
 server.listen(PORT, () => {
-    console.log(`🌐 HTTP server tilgjengelig på port ${PORT}`);
-    console.log(`🔌 WebSocket server tilgjengelig`);
+    console.log(`🌐 Serveren lytter på http://localhost:${PORT}`);
 });
-
-process.on('SIGINT', () => {
-    console.log('\n🛑 Server stenges ned...');
-    clients.forEach((client) => {
-        client.ws.close();
-    });
-    wss.close();
-    server.close(() => {
-        console.log('✅ Server stengt');
-        process.exit(0);
-    });
-});
-
-setInterval(() => {
-    const activeClients = Array.from(clients.values()).filter(c => c.ws.readyState === WebSocket.OPEN);
-    const activeRooms = Object.keys(rooms).length;
-    
-    console.log(`📊 Status: ${activeClients.length} aktive klienter, ${activeRooms} aktive rom`);
-    
-    let cleanedUp = 0;
-    clients.forEach((client, clientId) => {
-        if (client.ws.readyState !== WebSocket.OPEN) {
-            handleClientDisconnect(clientId);
-            cleanedUp++;
-        }
-    });
-    
-    if (cleanedUp > 0) {
-        console.log(`🧹 Cleaned up ${cleanedUp} stale connections`);
-    }
-}, 30000);
-
-console.log('🔗 Server v2.0 klar for tilkoblinger!');
